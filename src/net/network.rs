@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use super::deliver_packet::DeliverPacket;
 use super::id::{LinkId, NodeId};
+use super::link_ready::LinkReady;
 use super::link::Link;
 use super::node::{Host, Node, Switch};
 use super::packet::Packet;
@@ -101,31 +102,94 @@ impl Network {
             "找到链路"
         );
 
+        // 入队：若队列满则直接丢弃（DropTail）
         let now = sim.now();
-        let start = now.max(link.busy_until);
-        let tx_time = link.tx_time(pkt.size_bytes);
-        let depart = SimTime(start.0.saturating_add(tx_time.0));
-        link.busy_until = depart;
-        let arrive = SimTime(depart.0.saturating_add(link.latency.0));
+        match link.queue.enqueue(pkt) {
+            Ok(()) => {
+                trace!(
+                    now = ?now,
+                    q_len = link.queue.len(),
+                    q_bytes = link.queue.bytes(),
+                    "packet 入队成功"
+                );
+            }
+            Err(pkt) => {
+                self.stats.dropped_pkts += 1;
+                self.stats.dropped_bytes += pkt.size_bytes as u64;
+                debug!(
+                    now = ?now,
+                    link_id = ?link_id,
+                    dropped_pkts = self.stats.dropped_pkts,
+                    "队列已满，DropTail 丢弃 packet"
+                );
+                return;
+            }
+        }
+
+        // 若链路空闲，则立即开始发送队头 packet
+        if now >= link.busy_until {
+            self.transmit_next_on_link(link_id, sim);
+        }
+    }
+
+    /// depart 时刻触发：链路完成一次序列化发送，尝试发送下一个队头 packet
+    pub(crate) fn on_link_ready(&mut self, link_id: LinkId, sim: &mut Simulator) {
+        let now = sim.now();
+        let busy_until = self.links[link_id.0].busy_until;
+        // 可能会遇到同一时刻的竞态（LinkReady 与新的 forward_from 同时发生）
+        if busy_until > now {
+            return;
+        }
+        debug!(
+            now = ?now,
+            busy_until = ?busy_until,
+            "链路空闲，尝试发送下一个队头 packet"
+        );
+        self.transmit_next_on_link(link_id, sim);
+    }
+
+    fn transmit_next_on_link(&mut self, link_id: LinkId, sim: &mut Simulator) {
+        let now = sim.now();
+
+        // 先取出必要的链路参数，避免同时持有 link 的可变借用与 schedule
+        let (to, latency, bandwidth_bps, pkt_opt) = {
+            let link = &mut self.links[link_id.0];
+            let pkt_opt = link.queue.dequeue();
+            (link.to, link.latency, link.bandwidth_bps, pkt_opt)
+        };
+
+        let Some(pkt) = pkt_opt else {
+            return;
+        };
+
+        // 重新借用 link 更新 busy_until（仅此处更新）
+        let tx_time = {
+            let link = &self.links[link_id.0];
+            // 使用链路带宽计算序列化时延
+            link.tx_time(pkt.size_bytes)
+        };
+        let depart = SimTime(now.0.saturating_add(tx_time.0));
+        {
+            let link = &mut self.links[link_id.0];
+            link.busy_until = depart;
+        }
+        let arrive = SimTime(depart.0.saturating_add(latency.0));
 
         trace!(
             now = ?now,
-            busy_until = ?link.busy_until,
-            start = ?start,
+            link_id = ?link_id,
+            to = ?to,
             tx_time = ?tx_time,
             depart = ?depart,
             arrive = ?arrive,
-            "计算传输时间"
+            bandwidth_bps = bandwidth_bps,
+            "链路发送队头 packet"
         );
-        
-        debug!(
-            arrive = ?arrive,
-            to = ?to,
-            next_hop = pkt.hop + 1,
-            "调度数据包到达事件"
-        );
-        
+
+        // 到达事件（传播时延 + 序列化时延）
         sim.schedule(arrive, DeliverPacket { to, pkt: pkt.advance() });
+        // depart 时刻再次触发，继续出队
+        sim.schedule(depart, LinkReady { link_id });
     }
 
     /// 数据包送达目的地时的处理

@@ -7,4 +7,6 @@
 pub struct Stats {
     pub delivered_pkts: u64,
     pub delivered_bytes: u64,
+    pub dropped_pkts: u64,
+    pub dropped_bytes: u64,
 }

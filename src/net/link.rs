@@ -3,16 +3,19 @@
 //! 定义网络链路及其传输时延计算。
 
 use super::id::NodeId;
+use crate::queue::{DropTailQueue, PacketQueue};
 use crate::sim::SimTime;
 
 /// 网络链路
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct Link {
     pub from: NodeId,
     pub to: NodeId,
     pub latency: SimTime,
     pub bandwidth_bps: u64,
     pub busy_until: SimTime,
+    /// 链路上的排队策略（默认 DropTail，容量极大，行为与旧逻辑一致但可扩展）
+    pub queue: Box<dyn PacketQueue>,
 }
 
 impl Link {
@@ -24,6 +27,7 @@ impl Link {
             latency,
             bandwidth_bps,
             busy_until: SimTime::ZERO,
+            queue: Box::new(DropTailQueue::new(u64::MAX)),
         }
     }
 
