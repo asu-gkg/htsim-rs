@@ -25,8 +25,8 @@ impl Event for DeliverPacket {
             pkt_id = pkt.id,
             flow_id = pkt.flow_id,
             size_bytes = pkt.size_bytes,
-            hop = pkt.hop,
-            route_len = pkt.route.len(),
+            dst = ?pkt.dst,
+            hops_taken = pkt.hops_taken,
             to = ?to,
             now = ?sim.now(),
             "数据包到达节点"

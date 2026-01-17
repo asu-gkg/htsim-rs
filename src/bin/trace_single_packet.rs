@@ -56,8 +56,8 @@ impl Event for TraceSinglePacket {
         let pkt = w.net.make_packet(flow_id, pkt_bytes, route.clone());
         trace!(
             pkt_id = pkt.id,
-            hop = pkt.hop,
-            route_len = pkt.route.len(),
+            dst = ?pkt.dst,
+            hops_taken = pkt.hops_taken,
             "创建数据包"
         );
         

@@ -11,17 +11,36 @@ use super::link::Link;
 use super::node::{Host, Node, Switch};
 use super::packet::Packet;
 use super::stats::Stats;
+use super::routing::RoutingTable;
 use crate::sim::{SimTime, Simulator};
 use tracing::{debug, info, trace};
 
 /// 网络拓扑
-#[derive(Default)]
 pub struct Network {
     nodes: Vec<Option<Box<dyn Node>>>,
     links: Vec<Link>,
     edges: HashMap<(NodeId, NodeId), LinkId>,
+    adj: Vec<Vec<NodeId>>,
+    rev_adj: Vec<Vec<NodeId>>,
+    routing: RoutingTable,
     next_pkt_id: u64,
     pub stats: Stats,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            links: Vec::new(),
+            edges: HashMap::new(),
+            adj: Vec::new(),
+            rev_adj: Vec::new(),
+            // 固定盐，保证每次运行 ECMP 选择可重复
+            routing: RoutingTable::new(0xC5A1_DA7A_5EED_1234),
+            next_pkt_id: 0,
+            stats: Stats::default(),
+        }
+    }
 }
 
 impl Network {
@@ -29,6 +48,8 @@ impl Network {
     pub fn add_host(&mut self, name: impl Into<String>) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Some(Box::new(Host::new(id, name))));
+        self.adj.push(Vec::new());
+        self.rev_adj.push(Vec::new());
         id
     }
 
@@ -36,6 +57,8 @@ impl Network {
     pub fn add_switch(&mut self, name: impl Into<String>) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Some(Box::new(Switch::new(id, name))));
+        self.adj.push(Vec::new());
+        self.rev_adj.push(Vec::new());
         id
     }
 
@@ -50,6 +73,9 @@ impl Network {
         let id = LinkId(self.links.len());
         self.links.push(Link::new(from, to, latency, bandwidth_bps));
         self.edges.insert((from, to), id);
+        self.adj[from.0].push(to);
+        self.rev_adj[to.0].push(from);
+        self.routing.mark_dirty();
         id
     }
 
@@ -57,13 +83,33 @@ impl Network {
     pub fn make_packet(&mut self, flow_id: u64, size_bytes: u32, route: Vec<NodeId>) -> Packet {
         let id = self.next_pkt_id;
         self.next_pkt_id = self.next_pkt_id.wrapping_add(1);
-        Packet {
-            id,
-            flow_id,
-            size_bytes,
-            route,
-            hop: 0,
-        }
+        Packet::new_preset(id, flow_id, size_bytes, route)
+    }
+
+    /// 创建“纯动态路由”的数据包：每一跳根据 FIB/ECMP 决定下一跳
+    pub fn make_packet_dynamic(
+        &mut self,
+        flow_id: u64,
+        size_bytes: u32,
+        src: NodeId,
+        dst: NodeId,
+    ) -> Packet {
+        let id = self.next_pkt_id;
+        self.next_pkt_id = self.next_pkt_id.wrapping_add(1);
+        Packet::new_dynamic(id, flow_id, size_bytes, src, dst)
+    }
+
+    /// 创建“混合路由”的数据包：先沿 prefix 预设前缀走，再动态路由到 dst
+    pub fn make_packet_mixed(
+        &mut self,
+        flow_id: u64,
+        size_bytes: u32,
+        prefix: Vec<NodeId>,
+        dst: NodeId,
+    ) -> Packet {
+        let id = self.next_pkt_id;
+        self.next_pkt_id = self.next_pkt_id.wrapping_add(1);
+        Packet::new_mixed(id, flow_id, size_bytes, prefix, dst)
     }
 
     /// 将数据包交付给节点处理
@@ -83,12 +129,24 @@ impl Network {
     }
 
     /// 从指定节点转发数据包
-    #[tracing::instrument(skip(self, sim), fields(pkt_id = pkt.id, from = ?from, hop = pkt.hop))]
+    #[tracing::instrument(skip(self, sim), fields(pkt_id = pkt.id, from = ?from, hops_taken = pkt.hops_taken, dst = ?pkt.dst))]
     pub fn forward_from(&mut self, from: NodeId, pkt: Packet, sim: &mut Simulator) {
         debug!("🚀 从指定节点转发数据包");
-        
-        let to = pkt.next().expect("has_next checked by caller");
-        trace!(to = ?to, "查找下一跳");
+
+        let to = if let Some(nh) = pkt.preset_next() {
+            trace!(to = ?nh, "使用预设下一跳");
+            nh
+        } else {
+            // 动态路由：根据 FIB/ECMP 选择下一跳
+            self.routing.ensure_built(&self.adj, &self.rev_adj);
+            let cands = self
+                .routing
+                .next_hops(from, pkt.dst)
+                .unwrap_or_else(|| panic!("no route from {:?} to {:?}", from, pkt.dst));
+            let nh = self.routing.pick_ecmp(from, pkt.dst, pkt.flow_id, cands);
+            trace!(to = ?nh, cands = ?cands, "动态路由（ECMP）选择下一跳");
+            nh
+        };
         
         let link_id = *self
             .edges

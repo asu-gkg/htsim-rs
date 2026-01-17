@@ -12,6 +12,7 @@ mod network;
 mod deliver_packet;
 mod net_world;
 mod link_ready;
+mod routing;
 
 // 重新导出公共接口
 pub use id::{NodeId, LinkId};
@@ -23,3 +24,4 @@ pub use network::Network;
 pub use deliver_packet::DeliverPacket;
 pub use net_world::NetWorld;
 pub use link_ready::LinkReady;
+pub use routing::RoutingTable;

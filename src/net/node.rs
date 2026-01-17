@@ -50,14 +50,13 @@ impl Node for Host {
     fn on_packet(&mut self, pkt: Packet, sim: &mut Simulator, net: &mut Network) {
         debug!("🖥️  Host 处理数据包");
         trace!(
-            hop = pkt.hop,
-            route_len = pkt.route.len(),
-            has_next = pkt.has_next(),
+            dst = ?pkt.dst,
+            hops_taken = pkt.hops_taken,
             "数据包信息"
         );
         
-        if pkt.has_next() {
-            debug!("还有下一跳，继续转发");
+        if self.id != pkt.dst {
+            debug!("未到达目的地，继续转发");
             net.forward_from(self.id, pkt, sim);
         } else {
             info!("已到达目的地，标记为已送达");
@@ -96,14 +95,13 @@ impl Node for Switch {
     fn on_packet(&mut self, pkt: Packet, sim: &mut Simulator, net: &mut Network) {
         debug!("🔀 Switch 处理数据包");
         trace!(
-            hop = pkt.hop,
-            route_len = pkt.route.len(),
-            has_next = pkt.has_next(),
+            dst = ?pkt.dst,
+            hops_taken = pkt.hops_taken,
             "数据包信息"
         );
         
-        if pkt.has_next() {
-            debug!("还有下一跳，继续转发");
+        if self.id != pkt.dst {
+            debug!("未到达目的地，继续转发");
             net.forward_from(self.id, pkt, sim);
         } else {
             info!("已到达目的地，标记为已送达");
