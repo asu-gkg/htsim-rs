@@ -7,5 +7,5 @@
 
 mod types;
 
-pub use types::{VizEvent, VizEventKind, VizLogger, VizNodeKind, VizPacketKind, VizTcp};
+pub use types::{VizEvent, VizEventKind, VizLinkInfo, VizLogger, VizNodeInfo, VizNodeKind, VizPacketKind, VizTcp};
 

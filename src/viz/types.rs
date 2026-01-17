@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VizEventKind {
+    /// 仿真/拓扑元信息（建议作为 t=0 的第一条事件）
+    Meta {
+        nodes: Vec<VizNodeInfo>,
+        links: Vec<VizLinkInfo>,
+    },
     /// 节点开始处理一个到达的数据包（可用于区分 host/switch）
     NodeRx {
         node: usize,
@@ -62,6 +67,25 @@ pub enum VizPacketKind {
 pub enum VizNodeKind {
     Host,
     Switch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VizNodeInfo {
+    pub id: usize,
+    pub name: String,
+    pub kind: VizNodeKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VizLinkInfo {
+    pub from: usize,
+    pub to: usize,
+    /// 单向链路带宽（bps）
+    pub bandwidth_bps: u64,
+    /// 单向传播时延（ns）
+    pub latency_ns: u64,
+    /// 队列容量（bytes）
+    pub q_cap_bytes: u64,
 }
 
 /// 与 TCP 有关的字段（用于展示 seq/ack/cwnd 等）

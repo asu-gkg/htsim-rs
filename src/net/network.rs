@@ -16,7 +16,7 @@ use crate::proto::tcp::TcpStack;
 use crate::proto::Transport;
 use crate::queue::DropTailQueue;
 use crate::sim::{SimTime, Simulator};
-use crate::viz::{VizEvent, VizEventKind, VizLogger, VizNodeKind, VizPacketKind, VizTcp};
+use crate::viz::{VizEvent, VizEventKind, VizLinkInfo, VizLogger, VizNodeInfo, VizNodeKind, VizPacketKind, VizTcp};
 use tracing::{debug, info, trace};
 
 /// 网络拓扑
@@ -68,6 +68,41 @@ impl Network {
         if let Some(v) = &mut self.viz {
             v.push(ev);
         }
+    }
+
+    pub fn emit_viz_meta(&mut self) {
+        if self.viz.is_none() {
+            return;
+        }
+        let nodes = self
+            .node_names
+            .iter()
+            .enumerate()
+            .map(|(id, name)| VizNodeInfo {
+                id,
+                name: name.clone(),
+                kind: *self.node_kinds.get(id).unwrap_or(&VizNodeKind::Switch),
+            })
+            .collect::<Vec<_>>();
+        let links = self
+            .links
+            .iter()
+            .map(|l| VizLinkInfo {
+                from: l.from.0,
+                to: l.to.0,
+                bandwidth_bps: l.bandwidth_bps,
+                latency_ns: l.latency.0,
+                q_cap_bytes: l.queue.capacity_bytes(),
+            })
+            .collect::<Vec<_>>();
+        self.viz_push(VizEvent {
+            t_ns: 0,
+            pkt_id: None,
+            flow_id: None,
+            pkt_bytes: None,
+            pkt_kind: None,
+            kind: VizEventKind::Meta { nodes, links },
+        });
     }
 
     pub(crate) fn viz_tcp_send_data(&mut self, t_ns: u64, conn_id: u64, seq: u64, len: u32) {

@@ -76,10 +76,6 @@ fn main() {
     let mut sim = Simulator::default();
     let mut world = NetWorld::default();
 
-    if args.viz_json.is_some() {
-        world.net.viz = Some(htsim_rs::viz::VizLogger::default());
-    }
-
     let opts = DumbbellOpts {
         pkt_bytes: args.mss, // 仅用于拓扑构建/默认参数占位
         pkts: 0,
@@ -102,6 +98,12 @@ fn main() {
             world.net.set_link_queue_capacity_bytes(s0, s1, cap_bytes);
             world.net.set_link_queue_capacity_bytes(s1, s0, cap_bytes);
         }
+    }
+
+    // 启用可视化：在拓扑与队列容量设置完成后，发出 meta（含带宽/时延/队列容量）
+    if args.viz_json.is_some() {
+        world.net.viz = Some(htsim_rs::viz::VizLogger::default());
+        world.net.emit_viz_meta();
     }
 
     let cfg = TcpConfig {

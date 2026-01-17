@@ -170,6 +170,11 @@
         </div>
 
         <div class="row">
+          <button id="jumpDrop" class="secondary" disabled>跳到下一次丢包</button>
+          <div class="small">从当前时间往后查找下一条 drop 事件（可配合 flow_id 过滤）。</div>
+        </div>
+
+        <div class="row">
           <label>速度</label>
           <select id="speed" disabled>
             <option value="0.25">0.25x</option>
@@ -179,6 +184,23 @@
             <option value="5">5x</option>
             <option value="10">10x</option>
           </select>
+        </div>
+
+        <div class="row">
+          <label>回放时长（秒，1x 时播完整段仿真）</label>
+          <select id="targetWallSec" disabled>
+            <option value="3">3s</option>
+            <option value="6">6s</option>
+            <option value="12" selected>12s</option>
+            <option value="20">20s</option>
+            <option value="40">40s</option>
+          </select>
+          <div class="small">避免“仿真只有几十毫秒，播放一两帧就到结尾”的问题。</div>
+        </div>
+
+        <div class="row">
+          <label>节点 / 链路状态（随时间更新）</label>
+          <div id="stats" class="log">（空）</div>
         </div>
 
         <div class="timeline">
@@ -199,6 +221,8 @@
 
       <div class="right">
         <canvas id="cv" width="1100" height="360"></canvas>
+        <div style="height: 12px"></div>
+        <canvas id="tcpCv" width="1100" height="240"></canvas>
         <div class="hint">
           说明：蓝色圆点=Data，绿色圆点=ACK，红色 X=Drop。链路上的圆点会按 <span class="kbd">tx_start.depart_ns → arrive_ns</span>
           做线性动画。节点高亮表示 <span class="kbd">node_rx</span>。
@@ -215,13 +239,18 @@
       const pauseEl = $("pause");
       const stepEl = $("step");
       const speedEl = $("speed");
+      const targetWallSecEl = $("targetWallSec");
       const sliderEl = $("slider");
       const statusEl = $("status");
       const curEl = $("cur");
+      const statsEl = $("stats");
+      const jumpDropEl = $("jumpDrop");
       const filterFlowEl = $("filterFlow");
       const filterPktEl = $("filterPkt");
       const cv = $("cv");
       const ctx = cv.getContext("2d");
+      const tcpCv = $("tcpCv");
+      const tcpCtx = tcpCv.getContext("2d");
 
       /** @type {VizEvent[]} */
       let events = [];
@@ -244,16 +273,58 @@
       /** @type {string[]} */
       let lastEventsText = [];
 
-      const nodes = [
+      // meta（来自 kind=meta）
+      /** @type {{nodes?: any[], links?: any[]}|null} */
+      let meta = null;
+      /** @type {any[]} */
+      let nodes = [
         { id: 0, name: "h0", kind: "host", x: 120, y: 180 },
         { id: 2, name: "s0", kind: "switch", x: 380, y: 180 },
         { id: 3, name: "s1", kind: "switch", x: 720, y: 180 },
         { id: 1, name: "h1", kind: "host", x: 980, y: 180 },
       ];
-      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      let nodeById = new Map(nodes.map((n) => [n.id, n]));
+
+      // 统计状态（由事件增量更新）
+      /** @type {Map<number, any>} */
+      let nodeStats = new Map(); // id -> counters
+      /** @type {Map<string, any>} */
+      let linkStats = new Map(); // "from->to" -> {q_bytes,q_cap,tx_pkts,drop_pkts,bandwidth_bps,latency_ns}
+      /** @type {{send_data:number, send_ack:number, recv_ack:number, rto:number}} */
+      let tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
+
+      // TCP 时序（从 tcp_* 事件推演 cwnd/state，不改 Rust 侧协议实现）
+      /** @type {Map<number, {mss:number, points:Array<any>}>} */
+      let tcpSeries = new Map();
+
+      function linkKey(a, b) {
+        return `${a}->${b}`;
+      }
 
       function fmtMs(ns) {
         return (ns / 1e6).toFixed(3) + " ms";
+      }
+
+      function fmtGbps(bps) {
+        if (bps == null) return "-";
+        return (Number(bps) / 1e9).toFixed(3) + " Gbps";
+      }
+
+      function fmtBytes(x) {
+        if (x == null) return "-";
+        const n = Number(x);
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(2)} KiB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MiB`;
+        return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+      }
+
+      function fmtCapBytes(x) {
+        // Rust 里默认 DropTailQueue 是 u64::MAX（几乎无限），直接显示会很难读
+        if (x == null) return "-";
+        const n = Number(x);
+        if (n === 18446744073709551615) return "∞";
+        return fmtBytes(n);
       }
 
       function setEnabled(ok) {
@@ -261,7 +332,9 @@
         pauseEl.disabled = !ok;
         stepEl.disabled = !ok;
         speedEl.disabled = !ok;
+        targetWallSecEl.disabled = !ok;
         sliderEl.disabled = !ok;
+        jumpDropEl.disabled = !ok;
       }
 
       function applyFilter() {
@@ -287,12 +360,48 @@
         nodeHighlight = new Map();
         dropMarks = [];
         lastEventsText = [];
+        nodeStats = new Map();
+        linkStats = new Map();
+        tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
+        tcpSeries = buildTcpSeries(events);
+        initStatsFromMeta();
         cursor = 0;
         curTime = t0;
         sliderEl.value = "0";
         updateStatus();
         redraw();
         showCurrentText();
+        showStatsText();
+        redrawTcp();
+      }
+
+      function initStatsFromMeta() {
+        // nodes
+        for (const n of nodes) {
+          nodeStats.set(n.id, {
+            rx: 0,
+            forward: 0,
+            delivered: 0,
+            bytes: 0,
+          });
+        }
+        // links
+        if (meta?.links) {
+          for (const l of meta.links) {
+            linkStats.set(linkKey(l.from, l.to), {
+              from: l.from,
+              to: l.to,
+              q_bytes: 0,
+              q_peak: 0,
+              q_cap: l.q_cap_bytes ?? null,
+              tx_pkts: 0,
+              drop_pkts: 0,
+              first_drop_t: null,
+              bandwidth_bps: l.bandwidth_bps ?? null,
+              latency_ns: l.latency_ns ?? null,
+            });
+          }
+        }
       }
 
       function updateStatus() {
@@ -306,6 +415,307 @@
         curEl.textContent = lastEventsText.slice(-80).join("\n") || "（空）";
       }
 
+      function showStatsText() {
+        const lines = [];
+        lines.push(`时间：${fmtMs(curTime)} / ${fmtMs(t1)}`);
+        lines.push("说明：drop 发生在链路队列（link_from->link_to），不是 host。");
+        lines.push("提示：最终 q=0 只代表仿真结束时队列已排空；请看 q_peak（峰值）或点“跳到首次丢包”。");
+        lines.push("");
+        lines.push("节点状态（计数随时间推进）：");
+        lines.push("- rx：节点收到并开始处理（node_rx）");
+        lines.push("- forward：节点决定下一跳（node_forward）");
+        lines.push("- delivered：到达目的节点并交付（delivered）");
+        lines.push("");
+        for (const n of nodes) {
+          const s = nodeStats.get(n.id) || {};
+          lines.push(
+            `- ${n.name}(${n.kind}) id=${n.id}: rx=${s.rx ?? 0}, forward=${s.forward ?? 0}, delivered=${s.delivered ?? 0}, rx_bytes=${fmtBytes(s.bytes ?? 0)}`
+          );
+        }
+        lines.push("");
+        lines.push("链路状态（队列/带宽/时延）：");
+        lines.push("- q：队列字节数（enqueue/drop 事件里的 q_bytes）");
+        lines.push("- q_peak：队列峰值（整个回放过程中观察到的最大 q）");
+        lines.push("- tx：链路开始发送次数（tx_start；视为出队）");
+        lines.push("- drop：丢包次数（drop；发生在该链路队列入队时）");
+        const keys = Array.from(linkStats.keys()).sort();
+        for (const k of keys) {
+          const s = linkStats.get(k);
+          if (!s) continue;
+          const q = `${fmtBytes(s.q_bytes)}/${s.q_cap != null ? fmtCapBytes(s.q_cap) : "-"}`;
+          const qp = `${fmtBytes(s.q_peak ?? 0)}/${s.q_cap != null ? fmtCapBytes(s.q_cap) : "-"}`;
+          const lat = s.latency_ns != null ? fmtMs(s.latency_ns) : "-";
+          const fd = s.first_drop_t != null ? fmtMs(s.first_drop_t) : "-";
+          lines.push(
+            `- ${k}: q=${q}, q_peak=${qp}, tx=${s.tx_pkts}, drop=${s.drop_pkts} (first_drop=${fd}), bw=${fmtGbps(s.bandwidth_bps)}, lat=${lat}`
+          );
+        }
+        lines.push("");
+        lines.push("TCP（全局事件计数）：");
+        lines.push(`- send_data=${tcpStats.send_data}, send_ack=${tcpStats.send_ack}, recv_ack=${tcpStats.recv_ack}, rto=${tcpStats.rto}`);
+        statsEl.textContent = lines.join("\n");
+      }
+
+      // ---------- TCP 时序图 ----------
+      function redrawTcp() {
+        tcpCtx.clearRect(0, 0, tcpCv.width, tcpCv.height);
+
+        // 背景框
+        rr(tcpCtx, 0.5, 0.5, tcpCv.width - 1, tcpCv.height - 1, 14);
+        tcpCtx.fillStyle = "rgba(255,255,255,0.05)";
+        tcpCtx.fill();
+        tcpCtx.strokeStyle = "rgba(255,255,255,0.10)";
+        tcpCtx.stroke();
+
+        const conns = Array.from(tcpSeries.keys()).sort((a, b) => a - b);
+        const prefer = filterFlowEl.value.trim() ? Number(filterFlowEl.value.trim()) : null;
+        const cid = prefer != null && tcpSeries.has(prefer) ? prefer : conns[0];
+        if (cid == null) {
+          drawTcpBox("TCP 时序：无 tcp_* 事件");
+          return;
+        }
+        const ser = tcpSeries.get(cid);
+        const pts = ser?.points || [];
+        const mss = ser?.mss || 1460;
+        if (pts.length === 0) {
+          drawTcpBox(`TCP 时序：conn=${cid} 无可用数据点`);
+          return;
+        }
+
+        const pad = { l: 70, r: 14, t: 22, b: 28 };
+        const W = tcpCv.width - pad.l - pad.r;
+        const H = tcpCv.height - pad.t - pad.b;
+        const xOf = (t) => pad.l + ((t - t0) / Math.max(1, t1 - t0)) * W;
+
+        const maxCwnd = Math.max(...pts.map((p) => p.cwnd));
+        const maxPkts = Math.max(2, Math.ceil(maxCwnd / mss) + 2);
+        const yOfPkts = (pkts) => pad.t + (1 - pkts / maxPkts) * H;
+
+        // 网格 + y 轴标签
+        tcpCtx.save();
+        tcpCtx.strokeStyle = "rgba(255,255,255,0.10)";
+        tcpCtx.fillStyle = "rgba(255,255,255,0.70)";
+        tcpCtx.font = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+        for (let k = 0; k <= 4; k++) {
+          const pk = Math.round((maxPkts * k) / 4);
+          const y = yOfPkts(pk);
+          tcpCtx.beginPath();
+          tcpCtx.moveTo(pad.l, y);
+          tcpCtx.lineTo(pad.l + W, y);
+          tcpCtx.stroke();
+          tcpCtx.textAlign = "right";
+          tcpCtx.textBaseline = "middle";
+          tcpCtx.fillText(`${pk} pkts`, pad.l - 10, y);
+        }
+        tcpCtx.textAlign = "left";
+        tcpCtx.textBaseline = "top";
+        tcpCtx.fillText(`TCP cwnd 时序（conn=${cid}，mss≈${mss}B）`, pad.l, 6);
+        tcpCtx.restore();
+
+        // 线条：cwnd / ssthresh / inflight
+        drawTcpLine(pts, "ssthresh", "rgba(255,255,255,0.55)", true, xOf, yOfPkts, mss);
+        drawTcpLine(pts, "inflight", "rgba(122,162,255,0.35)", false, xOf, yOfPkts, mss);
+        drawTcpLine(pts, "cwnd", "#7aa2ff", false, xOf, yOfPkts, mss);
+
+        // 当前点高亮 + 状态文本
+        const curP = pickPointAt(pts, curTime);
+        if (curP) {
+          const x = xOf(curP.t);
+          const y = yOfPkts(curP.cwnd / mss);
+          tcpCtx.save();
+          tcpCtx.fillStyle = "#ffdd57";
+          tcpCtx.strokeStyle = "rgba(0,0,0,0.35)";
+          tcpCtx.lineWidth = 2;
+          tcpCtx.beginPath();
+          tcpCtx.arc(x, y, 6, 0, Math.PI * 2);
+          tcpCtx.fill();
+          tcpCtx.stroke();
+          tcpCtx.restore();
+
+          drawTcpBox(
+            `state=${curP.state}  cwnd=${fmtBytes(curP.cwnd)} (${(curP.cwnd / mss).toFixed(2)} pkts)  ssthresh=${fmtBytes(curP.ssthresh)}  inflight=${fmtBytes(curP.inflight)}  lastAck=${curP.lastAck}  dupAck=${curP.dup}`
+          );
+        }
+      }
+
+      function drawTcpLine(pts, field, color, dashed, xOf, yOfPkts, mss) {
+        tcpCtx.save();
+        tcpCtx.strokeStyle = color;
+        tcpCtx.lineWidth = 2;
+        if (dashed) tcpCtx.setLineDash([6, 4]);
+        tcpCtx.beginPath();
+        let first = true;
+        for (const p of pts) {
+          const x = xOf(p.t);
+          const y = yOfPkts(p[field] / mss);
+          if (first) {
+            tcpCtx.moveTo(x, y);
+            first = false;
+          } else {
+            tcpCtx.lineTo(x, y);
+          }
+        }
+        tcpCtx.stroke();
+        tcpCtx.restore();
+      }
+
+      function drawTcpBox(text) {
+        tcpCtx.save();
+        tcpCtx.fillStyle = "rgba(0,0,0,0.45)";
+        tcpCtx.strokeStyle = "rgba(255,255,255,0.12)";
+        tcpCtx.lineWidth = 1;
+        const x = 14;
+        const y = tcpCv.height - 52;
+        const w = tcpCv.width - 28;
+        const h = 38;
+        rr(tcpCtx, x, y, w, h, 10);
+        tcpCtx.fill();
+        tcpCtx.stroke();
+        tcpCtx.fillStyle = "rgba(255,255,255,0.90)";
+        tcpCtx.font = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+        tcpCtx.textAlign = "left";
+        tcpCtx.textBaseline = "middle";
+        tcpCtx.fillText(text, x + 10, y + h / 2);
+        tcpCtx.restore();
+      }
+
+      function pickPointAt(pts, t) {
+        let lo = 0,
+          hi = pts.length - 1,
+          ans = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (pts[mid].t <= t) {
+            ans = pts[mid];
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        return ans;
+      }
+
+      function buildTcpSeries(evts) {
+        /** @type {Map<number, any[]>} */
+        const byConn = new Map();
+        for (const e of evts) {
+          if (!e || typeof e.kind !== "string") continue;
+          if (!e.kind.startsWith("tcp_")) continue;
+          const cid = Number(e.conn_id ?? e.flow_id ?? 0);
+          if (!cid) continue;
+          if (!byConn.has(cid)) byConn.set(cid, []);
+          byConn.get(cid).push(e);
+        }
+        const out = new Map();
+        for (const [cid, arr] of byConn.entries()) {
+          arr.sort((a, b) => (a.t_ns ?? 0) - (b.t_ns ?? 0));
+          const mss = inferMss(arr) || 1460;
+          const initCwnd = inferInitCwnd(arr, mss);
+          let cwnd = initCwnd;
+          let ssthresh = 1000 * mss;
+          let lastAck = 0;
+          let dup = 0;
+          let state = "SS";
+          /** @type {Map<number, number>} */
+          const infl = new Map(); // seq -> len
+          const pts = [];
+
+          const inflightBytes = () => {
+            let s = 0;
+            for (const v of infl.values()) s += v;
+            return s;
+          };
+          const rec = (t, reason) =>
+            pts.push({ t, cwnd, ssthresh, inflight: inflightBytes(), lastAck, dup, state, reason });
+
+          rec(Number(arr[0]?.t_ns ?? 0), "init");
+
+          for (const e of arr) {
+            const t = Number(e.t_ns ?? 0);
+            if (e.kind === "tcp_send_data") {
+              if (e.seq != null && e.len != null) infl.set(Number(e.seq), Number(e.len));
+              rec(t, "send_data");
+            } else if (e.kind === "tcp_recv_ack") {
+              const ack = Number(e.ack ?? 0);
+              if (ack > lastAck) {
+                dup = 0;
+                const newly = ack - lastAck;
+                lastAck = ack;
+                for (const [seq, len] of Array.from(infl.entries())) {
+                  if (seq + len <= ack) infl.delete(seq);
+                }
+                if (cwnd < ssthresh) {
+                  state = "SS";
+                  cwnd = cwnd + newly;
+                } else {
+                  state = "CA";
+                  const inc = Math.max(1, Math.floor((mss * mss) / Math.max(1, cwnd)));
+                  cwnd = cwnd + inc;
+                }
+                rec(t, "new_ack");
+              } else if (ack === lastAck) {
+                dup = dup + 1;
+                if (dup === 3) {
+                  state = "FR";
+                  ssthresh = Math.max(Math.floor(cwnd / 2), 2 * mss);
+                  cwnd = ssthresh + 3 * mss;
+                  rec(t, "3_dupack");
+                } else if (dup > 3) {
+                  state = "FR";
+                  cwnd = cwnd + mss;
+                  rec(t, "more_dupack");
+                } else {
+                  rec(t, "dupack");
+                }
+              }
+            } else if (e.kind === "tcp_rto") {
+              state = "RTO";
+              ssthresh = Math.max(Math.floor(cwnd / 2), 2 * mss);
+              cwnd = mss;
+              dup = 0;
+              rec(t, "rto");
+            } else if (e.kind === "tcp_send_ack") {
+              rec(t, "send_ack");
+            }
+          }
+          out.set(cid, { mss, points: pts });
+        }
+        return out;
+      }
+
+      function inferMss(arr) {
+        let m = 0;
+        for (const e of arr) {
+          if (e.kind === "tcp_send_data" && e.len != null) m = Math.max(m, Number(e.len));
+        }
+        return m || null;
+      }
+
+      function inferInitCwnd(arr, mss) {
+        const ds = arr.filter((e) => e.kind === "tcp_send_data" && e.t_ns != null && e.len != null);
+        if (ds.length === 0) return 10 * mss;
+        const tMin = Math.min(...ds.map((e) => Number(e.t_ns)));
+        const sum = ds.filter((e) => Number(e.t_ns) === tMin).reduce((s, e) => s + Number(e.len), 0);
+        return Math.max(mss, sum || 10 * mss);
+      }
+
+      // round-rect helper（兼容）
+      function rr(c, x, y, w, h, r) {
+        if (typeof c.roundRect === "function") {
+          c.beginPath();
+          c.roundRect(x, y, w, h, r);
+          return;
+        }
+        const rr = Math.min(r, w / 2, h / 2);
+        c.beginPath();
+        c.moveTo(x + rr, y);
+        c.arcTo(x + w, y, x + w, y + h, rr);
+        c.arcTo(x + w, y + h, x, y + h, rr);
+        c.arcTo(x, y + h, x, y, rr);
+        c.arcTo(x, y, x + w, y, rr);
+        c.closePath();
+      }
+
       function stepOnce() {
         if (filtered.length === 0) return;
         // advance to next event time
@@ -317,6 +727,8 @@
         redraw();
         updateStatus();
         showCurrentText();
+        showStatsText();
+        redrawTcp();
       }
 
       function setTime(t) {
@@ -333,6 +745,10 @@
           nodeHighlight = new Map();
           dropMarks = [];
           lastEventsText = [];
+          nodeStats = new Map();
+          linkStats = new Map();
+          tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
+          initStatsFromMeta();
           cursor = 0;
         }
         while (cursor < filtered.length && filtered[cursor].t_ns <= t) {
@@ -358,9 +774,21 @@
           lastEventsText.push(
             `${head} pkt=${ev.pkt_id} ${ev.link_from}->${ev.link_to} depart=${fmtMs(ev.depart_ns)} arrive=${fmtMs(ev.arrive_ns)}`
           );
+          // link stats: dequeue at tx_start
+          const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
+          const ls =
+            linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+          const pb = ev.pkt_bytes != null ? Number(ev.pkt_bytes) : 0;
+          ls.q_bytes = Math.max(0, Number(ls.q_bytes || 0) - pb);
+          ls.tx_pkts = Number(ls.tx_pkts || 0) + 1;
+          ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
+          linkStats.set(lk, ls);
         } else if (kind === "delivered" && ev.pkt_id != null) {
           inflight.delete(Number(ev.pkt_id));
           lastEventsText.push(`${head} pkt=${ev.pkt_id} node=${ev.node}`);
+          const ns = nodeStats.get(Number(ev.node)) || {};
+          ns.delivered = Number(ns.delivered || 0) + 1;
+          nodeStats.set(Number(ev.node), ns);
         } else if (kind === "drop" && ev.pkt_id != null) {
           // 丢包不应该“直接消失”而看不见：在链路中点放一个短暂的红色 X 标记
           inflight.delete(Number(ev.pkt_id));
@@ -375,13 +803,38 @@
           lastEventsText.push(
             `${head} pkt=${ev.pkt_id} link=${ev.link_from}->${ev.link_to} q=${ev.q_bytes}/${ev.q_cap_bytes}`
           );
+          const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
+          const ls =
+            linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+          ls.drop_pkts = Number(ls.drop_pkts || 0) + 1;
+          // q_bytes/q_cap_bytes 直接覆盖（来自真实队列状态）
+          if (ev.q_bytes != null) ls.q_bytes = Number(ev.q_bytes);
+          if (ev.q_cap_bytes != null) ls.q_cap = Number(ev.q_cap_bytes);
+          ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
+          if (ls.first_drop_t == null) ls.first_drop_t = Number(ev.t_ns ?? 0);
+          linkStats.set(lk, ls);
         } else if (kind === "node_rx") {
           nodeHighlight.set(Number(ev.node), { node: Number(ev.node), until: ev.t_ns + 200_000 /* 0.2ms */ });
           lastEventsText.push(`${head} node=${ev.node} (${ev.node_kind}:${ev.node_name}) pkt=${ev.pkt_id}`);
+          const ns = nodeStats.get(Number(ev.node)) || {};
+          ns.rx = Number(ns.rx || 0) + 1;
+          if (ev.pkt_bytes != null) ns.bytes = Number(ns.bytes || 0) + Number(ev.pkt_bytes);
+          nodeStats.set(Number(ev.node), ns);
         } else if (kind === "node_forward") {
           lastEventsText.push(`${head} node=${ev.node} -> next=${ev.next} pkt=${ev.pkt_id}`);
+          const ns = nodeStats.get(Number(ev.node)) || {};
+          ns.forward = Number(ns.forward || 0) + 1;
+          nodeStats.set(Number(ev.node), ns);
         } else if (kind === "enqueue") {
           lastEventsText.push(`${head} pkt=${ev.pkt_id} link=${ev.link_from}->${ev.link_to} q=${ev.q_bytes}/${ev.q_cap_bytes}`);
+          const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
+          const ls =
+            linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+          // 用事件里的 q_bytes/q_cap_bytes（最准确）
+          if (ev.q_bytes != null) ls.q_bytes = Number(ev.q_bytes);
+          if (ev.q_cap_bytes != null) ls.q_cap = Number(ev.q_cap_bytes);
+          ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
+          linkStats.set(lk, ls);
         } else if (kind.startsWith("tcp_")) {
           // tcp_send_data / tcp_send_ack / tcp_recv_ack / tcp_rto
           const extra = [];
@@ -390,8 +843,25 @@
           if (ev.len != null) extra.push(`len=${ev.len}`);
           if (ev.ack != null) extra.push(`ack=${ev.ack}`);
           lastEventsText.push(`${head} ${extra.join(" ")}`.trim());
+          const cid = ev.conn_id != null ? Number(ev.conn_id) : null;
+          if (cid != null) {
+            // dumbbell 下 conn_id == flow_id == src 节点的统计并不总能直接映射到 node，
+            // 这里先用 flow_id 过滤；节点侧统计我们只记录“看到的包”，TCP 事件按全局计数展示。
+            // 若将来 meta 里加 conn->src/dst mapping，可再细化。
+          }
         } else {
           lastEventsText.push(`${head} pkt=${ev.pkt_id ?? "-"}`);
+        }
+
+        // TCP 事件计数（全局）
+        if (kind === "tcp_send_data") {
+          tcpStats.send_data += 1;
+        } else if (kind === "tcp_send_ack") {
+          tcpStats.send_ack += 1;
+        } else if (kind === "tcp_recv_ack") {
+          tcpStats.recv_ack += 1;
+        } else if (kind === "tcp_rto") {
+          tcpStats.rto += 1;
         }
       }
 
@@ -413,8 +883,22 @@
 
         // drop marks (red X)
         dropMarks = dropMarks.filter((m) => m.until >= curTime);
+        // 为了避免文字叠在一起：
+        // - X 永远画
+        // - 文字标签只给“每条链路最近的 1 个 drop”画（其余不画文字）
+        /** @type {Map<string, Array<any>>} */
+        const perLink = new Map();
         for (const m of dropMarks) {
-          drawDropMark(m);
+          const k = linkKey(m.from, m.to);
+          if (!perLink.has(k)) perLink.set(k, []);
+          perLink.get(k).push(m);
+        }
+        for (const [k, arr] of perLink.entries()) {
+          // 最近的在前
+          arr.sort((a, b) => b.at - a.at);
+          for (let i = 0; i < arr.length; i++) {
+            drawDropMark(arr[i], i, i === 0);
+          }
         }
       }
 
@@ -467,14 +951,28 @@
         return "#cdd6ff";
       }
 
-      function drawDropMark(m) {
+      function drawDropMark(m, stackIdx, showLabel) {
         const a = nodeById.get(m.from);
         const b = nodeById.get(m.to);
         if (!a || !b) return;
-        const x = (a.x + b.x) / 2;
-        const y = (a.y + b.y) / 2;
+        // 基础位置：链路中点；再按垂直方向堆叠偏移，避免重叠
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.max(1, Math.hypot(dx, dy));
+        const nx = -dy / len;
+        const ny = dx / len;
+        const layer = stackIdx % 6; // 最多 6 层循环
+        const offset = (layer - 2.5) * 14;
+        const x = mx + nx * offset;
+        const y = my + ny * offset;
+
+        // 按时间淡出
+        const alpha = Math.max(0, Math.min(1, 1 - (curTime - m.at) / Math.max(1, m.until - m.at)));
 
         ctx.save();
+        ctx.globalAlpha = 0.25 + 0.75 * alpha;
         ctx.strokeStyle = "#ff6b6b";
         ctx.lineWidth = 3;
         ctx.lineCap = "round";
@@ -486,11 +984,27 @@
         ctx.lineTo(x + r, y - r);
         ctx.stroke();
 
-        ctx.fillStyle = "rgba(255,255,255,0.85)";
-        ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.fillText(`drop pkt=${m.pkt_id}`, x, y + r + 2);
+        // 标签只展示每条链路最近的 1 个 drop，避免大量 drop 时文字叠在一起
+        if (showLabel) {
+          const label = `drop ${m.from}->${m.to} pkt=${m.pkt_id}`;
+          ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+          const tw = ctx.measureText(label).width;
+          const pad = 6;
+          const bx = x - (tw / 2) - pad;
+          const by = y + r + 2;
+          const bw = tw + pad * 2;
+          const bh = 18;
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.strokeStyle = "rgba(255,255,255,0.12)";
+          ctx.lineWidth = 1;
+          rr(ctx, bx, by, bw, bh, 8);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "rgba(255,255,255,0.90)";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, x, by + bh / 2);
+        }
         ctx.restore();
       }
 
@@ -526,14 +1040,19 @@
         lastWall = ts;
 
         const speed = Number(speedEl.value || "1");
-        // dt(ms) -> ns
-        const advance = dt * 1e6 * speed;
+        // 关键修复：不要用 wall-ms 直接映射 sim-ms（仿真通常只有几十 ms，会“一两帧跑完”）
+        // 改为：默认用 targetWallSec 在 1x 速度下播完整段仿真。
+        const targetWallMs = Number(targetWallSecEl.value || "12") * 1000;
+        const simDur = Math.max(1, t1 - t0);
+        const advance = (dt * (simDur / targetWallMs)) * speed;
         const target = Math.min(t1, curTime + advance);
         setTime(target);
         applyUntil(curTime);
         redraw();
         updateStatus();
         showCurrentText();
+        showStatsText();
+        redrawTcp();
 
         if (curTime >= t1) {
           playing = false;
@@ -549,12 +1068,34 @@
         try {
           const arr = JSON.parse(text);
           if (!Array.isArray(arr)) throw new Error("JSON 顶层不是数组");
-          events = arr;
+          // 支持 meta：数组里可以包含 kind=meta（建议 t=0 第一个）
+          const raw = arr;
+          const metas = raw.filter((e) => e && e.kind === "meta");
+          meta = metas.length ? metas[0] : null;
+          events = raw.filter((e) => e && e.kind !== "meta");
           // sort just in case
           events.sort((a, b) => (a.t_ns ?? 0) - (b.t_ns ?? 0));
           t0 = events.length ? events[0].t_ns : 0;
           t1 = events.length ? events[events.length - 1].t_ns : 0;
           filtered = events;
+          // 用 meta 里的节点信息（若存在）重建画布节点
+          if (meta?.nodes && Array.isArray(meta.nodes)) {
+            // 简单布局：按 id 排序水平摆放（dumbbell 仍会很直观）
+            const list = meta.nodes.slice().sort((a, b) => a.id - b.id);
+            const leftX = 120;
+            const rightX = 980;
+            const y = 180;
+            const n = Math.max(1, list.length);
+            const step = n === 1 ? 0 : (rightX - leftX) / (n - 1);
+            nodes = list.map((it, i) => ({
+              id: it.id,
+              name: it.name ?? `n${it.id}`,
+              kind: it.kind ?? "switch",
+              x: leftX + step * i,
+              y,
+            }));
+            nodeById = new Map(nodes.map((n) => [n.id, n]));
+          }
           setEnabled(true);
           playing = false;
           lastWall = 0;
@@ -565,8 +1106,47 @@
         }
       });
 
+      function jumpToNextDrop() {
+        if (filtered.length === 0) return;
+        const flow = filterFlowEl.value.trim();
+        const flowN = flow === "" ? null : Number(flow);
+        const idx = filtered.findIndex(
+          (e) =>
+            e &&
+            e.kind === "drop" &&
+            (e.t_ns ?? 0) > curTime &&
+            (flowN == null || Number(e.flow_id) === flowN)
+        );
+        if (idx < 0) return;
+        playing = false;
+        const t = filtered[idx].t_ns ?? t0;
+        setTime(t);
+        // 强制从头重放到该时刻，确保 stats 与动画一致
+        inflight = new Map();
+        nodeHighlight = new Map();
+        dropMarks = [];
+        lastEventsText = [];
+        nodeStats = new Map();
+        linkStats = new Map();
+        tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
+        tcpSeries = buildTcpSeries(events);
+        initStatsFromMeta();
+        cursor = 0;
+        applyUntil(curTime);
+        redraw();
+        updateStatus();
+        showCurrentText();
+        showStatsText();
+        redrawTcp();
+      }
+
+      jumpDropEl.addEventListener("click", jumpToNextDrop);
+
       filterFlowEl.addEventListener("input", applyFilter);
       filterPktEl.addEventListener("input", applyFilter);
+      targetWallSecEl.addEventListener("change", () => {
+        updateStatus();
+      });
 
       playEl.addEventListener("click", () => {
         if (filtered.length === 0) return;
@@ -591,6 +1171,8 @@
         redraw();
         updateStatus();
         showCurrentText();
+        showStatsText();
+        redrawTcp();
       });
 
       window.addEventListener("keydown", (e) => {
@@ -615,11 +1197,17 @@
           nodeHighlight = new Map();
           dropMarks = [];
           lastEventsText = [];
+          nodeStats = new Map();
+          linkStats = new Map();
+          tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
+          initStatsFromMeta();
           cursor = 0;
           applyUntil(curTime);
           redraw();
           updateStatus();
           showCurrentText();
+          showStatsText();
+          redrawTcp();
         }
       });
     </script>
