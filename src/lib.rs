@@ -2,6 +2,8 @@ pub mod net;
 pub mod sim;
 pub mod experiments;
 pub mod queue;
+pub mod proto;
+pub mod viz;
 
 // 保持原有 API：`htsim_rs::demo::*` 仍可用，但实现放在 experiments 目录里。
 pub use experiments::demo;

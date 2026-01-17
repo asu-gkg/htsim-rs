@@ -3,6 +3,7 @@
 //! 定义网络数据包及其相关操作。
 
 use super::id::NodeId;
+use crate::proto::Transport;
 
 /// 网络数据包
 #[derive(Debug, Clone)]
@@ -13,6 +14,8 @@ pub struct Packet {
     pub src: NodeId,
     pub dst: NodeId,
     pub routing: Routing,
+    /// 传输层标签（例如 TCP 段）。默认 `None`，保持与原有“裸包”逻辑兼容。
+    pub transport: Transport,
     /// 已经走过的 hop 数（用于调试/统计）
     pub hops_taken: u32,
 }
@@ -40,6 +43,7 @@ impl Packet {
             src,
             dst,
             routing: Routing::Preset { path, idx: 0 },
+            transport: Transport::None,
             hops_taken: 0,
         }
     }
@@ -53,6 +57,7 @@ impl Packet {
             src,
             dst,
             routing: Routing::Dynamic,
+            transport: Transport::None,
             hops_taken: 0,
         }
     }
@@ -73,6 +78,7 @@ impl Packet {
             src,
             dst,
             routing: Routing::Mixed { prefix, idx: 0 },
+            transport: Transport::None,
             hops_taken: 0,
         }
     }

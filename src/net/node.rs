@@ -60,7 +60,7 @@ impl Node for Host {
             net.forward_from(self.id, pkt, sim);
         } else {
             info!("已到达目的地，标记为已送达");
-            net.on_delivered(pkt);
+            net.on_delivered(self.id, pkt, sim);
         }
     }
 }
@@ -105,7 +105,7 @@ impl Node for Switch {
             net.forward_from(self.id, pkt, sim);
         } else {
             info!("已到达目的地，标记为已送达");
-            net.on_delivered(pkt);
+            net.on_delivered(self.id, pkt, sim);
         }
     }
 }

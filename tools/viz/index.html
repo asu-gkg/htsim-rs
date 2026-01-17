@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>htsim-rs 可视化回放</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #121a33;
+        --text: #e7ecff;
+        --muted: #aab3d6;
+        --accent: #7aa2ff;
+        --danger: #ff6b6b;
+        --ok: #64d49a;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+          "Apple Color Emoji", "Segoe UI Emoji";
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        min-height: 100vh;
+      }
+      .left {
+        background: var(--panel);
+        padding: 14px 14px 10px;
+        border-right: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .right {
+        padding: 14px;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 12px;
+        letter-spacing: 0.2px;
+      }
+      .row {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      input[type="file"],
+      input[type="text"],
+      select,
+      button {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 10px;
+        outline: none;
+      }
+      button {
+        cursor: pointer;
+        background: rgba(122, 162, 255, 0.16);
+        border-color: rgba(122, 162, 255, 0.32);
+      }
+      button.secondary {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.10);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btns {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+      .timeline {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      input[type="range"] {
+        width: 100%;
+      }
+      .small {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .kbd {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        padding: 2px 6px;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 6px;
+        background: rgba(0,0,0,0.25);
+        color: var(--text);
+      }
+      .log {
+        margin-top: 12px;
+        padding: 10px;
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 12px;
+        height: 40vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        color: #cdd6ff;
+      }
+      canvas {
+        width: 100%;
+        max-width: 1100px;
+        height: 360px;
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.10);
+        background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.08));
+        display: block;
+      }
+      .hint {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.06);
+        margin-right: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="left">
+        <h1>htsim-rs 回放器（离线 HTML）</h1>
+
+        <div class="row">
+          <label>1) 选择 JSON 事件文件（由 dumbbell_tcp 生成）</label>
+          <input id="file" type="file" accept=".json,application/json" />
+          <div class="small">
+            生成命令示例：<span class="kbd">cargo run --bin dumbbell_tcp -- --viz-json out.json ...</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>2) 过滤（可选）</label>
+          <input id="filterFlow" type="text" placeholder="flow_id (例如 1)" />
+          <input id="filterPkt" type="text" placeholder="pkt_id (例如 42)" />
+        </div>
+
+        <div class="row">
+          <label>3) 控制</label>
+          <div class="btns">
+            <button id="play" disabled>播放</button>
+            <button id="pause" class="secondary" disabled>暂停</button>
+            <button id="step" class="secondary" disabled>单步</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <label>速度</label>
+          <select id="speed" disabled>
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="5">5x</option>
+            <option value="10">10x</option>
+          </select>
+        </div>
+
+        <div class="timeline">
+          <label>时间轴</label>
+          <input id="slider" type="range" min="0" max="1000" value="0" disabled />
+          <div class="small">
+            <span class="pill">空格</span>播放/暂停
+            <span class="pill">←/→</span>单步
+          </div>
+          <div id="status" class="small">未加载</div>
+        </div>
+
+        <div class="row">
+          <label>当前事件（按时间推进）</label>
+          <div id="cur" class="log">（空）</div>
+        </div>
+      </div>
+
+      <div class="right">
+        <canvas id="cv" width="1100" height="360"></canvas>
+        <div class="hint">
+          说明：蓝色圆点=Data，绿色圆点=ACK，红色 X=Drop。链路上的圆点会按 <span class="kbd">tx_start.depart_ns → arrive_ns</span>
+          做线性动画。节点高亮表示 <span class="kbd">node_rx</span>。
+        </div>
+      </div>
+    </div>
+
+    <script>
+      /** @typedef {{t_ns:number, pkt_id?:number|null, flow_id?:number|null, pkt_bytes?:number|null, pkt_kind?:string|null, kind:string}} VizEvent */
+
+      const $ = (id) => document.getElementById(id);
+      const fileEl = $("file");
+      const playEl = $("play");
+      const pauseEl = $("pause");
+      const stepEl = $("step");
+      const speedEl = $("speed");
+      const sliderEl = $("slider");
+      const statusEl = $("status");
+      const curEl = $("cur");
+      const filterFlowEl = $("filterFlow");
+      const filterPktEl = $("filterPkt");
+      const cv = $("cv");
+      const ctx = cv.getContext("2d");
+
+      /** @type {VizEvent[]} */
+      let events = [];
+      /** @type {VizEvent[]} */
+      let filtered = [];
+      let t0 = 0;
+      let t1 = 0;
+      let curTime = 0;
+      let cursor = 0; // next event index
+      let playing = false;
+      let lastWall = 0;
+
+      // state for animation
+      /** @type {Map<number, any>} */
+      let inflight = new Map(); // pkt_id -> {from,to,depart,arrive,kind,flow_id}
+      /** @type {Map<number, {node:number, until:number}>} */
+      let nodeHighlight = new Map(); // node -> until(t_ns)
+      /** @type {Array<{pkt_id:number, flow_id:number|null, from:number, to:number, at:number, until:number}>} */
+      let dropMarks = [];
+      /** @type {string[]} */
+      let lastEventsText = [];
+
+      const nodes = [
+        { id: 0, name: "h0", kind: "host", x: 120, y: 180 },
+        { id: 2, name: "s0", kind: "switch", x: 380, y: 180 },
+        { id: 3, name: "s1", kind: "switch", x: 720, y: 180 },
+        { id: 1, name: "h1", kind: "host", x: 980, y: 180 },
+      ];
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+
+      function fmtMs(ns) {
+        return (ns / 1e6).toFixed(3) + " ms";
+      }
+
+      function setEnabled(ok) {
+        playEl.disabled = !ok;
+        pauseEl.disabled = !ok;
+        stepEl.disabled = !ok;
+        speedEl.disabled = !ok;
+        sliderEl.disabled = !ok;
+      }
+
+      function applyFilter() {
+        const flow = filterFlowEl.value.trim();
+        const pkt = filterPktEl.value.trim();
+        const flowN = flow === "" ? null : Number(flow);
+        const pktN = pkt === "" ? null : Number(pkt);
+        filtered = events.filter((e) => {
+          if (flowN != null) {
+            if (e.flow_id == null || Number(e.flow_id) !== flowN) return false;
+          }
+          if (pktN != null) {
+            if (e.pkt_id == null || Number(e.pkt_id) !== pktN) return false;
+          }
+          return true;
+        });
+        // reset playback state
+        resetPlayback();
+      }
+
+      function resetPlayback() {
+        inflight = new Map();
+        nodeHighlight = new Map();
+        dropMarks = [];
+        lastEventsText = [];
+        cursor = 0;
+        curTime = t0;
+        sliderEl.value = "0";
+        updateStatus();
+        redraw();
+        showCurrentText();
+      }
+
+      function updateStatus() {
+        statusEl.textContent =
+          filtered.length === 0
+            ? `已加载 ${events.length} 条事件（过滤后 0）`
+            : `已加载 ${events.length} 条事件（过滤后 ${filtered.length}），时间范围：${fmtMs(t0)} → ${fmtMs(t1)}，当前：${fmtMs(curTime)}`;
+      }
+
+      function showCurrentText() {
+        curEl.textContent = lastEventsText.slice(-80).join("\n") || "（空）";
+      }
+
+      function stepOnce() {
+        if (filtered.length === 0) return;
+        // advance to next event time
+        const ev = filtered[cursor];
+        if (!ev) return;
+        setTime(ev.t_ns);
+        // apply all events at exactly this t_ns
+        applyUntil(ev.t_ns);
+        redraw();
+        updateStatus();
+        showCurrentText();
+      }
+
+      function setTime(t) {
+        curTime = Math.max(t0, Math.min(t1, t));
+        const p = (curTime - t0) / Math.max(1, t1 - t0);
+        sliderEl.value = String(Math.floor(p * 1000));
+      }
+
+      function applyUntil(t) {
+        // if time goes backward, recompute from scratch
+        if (filtered.length === 0) return;
+        if (cursor > 0 && cursor < filtered.length && filtered[cursor - 1].t_ns > t) {
+          inflight = new Map();
+          nodeHighlight = new Map();
+          dropMarks = [];
+          lastEventsText = [];
+          cursor = 0;
+        }
+        while (cursor < filtered.length && filtered[cursor].t_ns <= t) {
+          const ev = filtered[cursor++];
+          applyEvent(ev);
+        }
+      }
+
+      function applyEvent(ev) {
+        const kind = ev.kind;
+        // concise text line
+        const head = `[${fmtMs(ev.t_ns)}] ${kind}`;
+        if (kind === "tx_start" && ev.pkt_id != null) {
+          inflight.set(Number(ev.pkt_id), {
+            pkt_id: Number(ev.pkt_id),
+            flow_id: ev.flow_id != null ? Number(ev.flow_id) : null,
+            from: Number(ev.link_from),
+            to: Number(ev.link_to),
+            depart: Number(ev.depart_ns),
+            arrive: Number(ev.arrive_ns),
+            pkt_kind: ev.pkt_kind || "other",
+          });
+          lastEventsText.push(
+            `${head} pkt=${ev.pkt_id} ${ev.link_from}->${ev.link_to} depart=${fmtMs(ev.depart_ns)} arrive=${fmtMs(ev.arrive_ns)}`
+          );
+        } else if (kind === "delivered" && ev.pkt_id != null) {
+          inflight.delete(Number(ev.pkt_id));
+          lastEventsText.push(`${head} pkt=${ev.pkt_id} node=${ev.node}`);
+        } else if (kind === "drop" && ev.pkt_id != null) {
+          // 丢包不应该“直接消失”而看不见：在链路中点放一个短暂的红色 X 标记
+          inflight.delete(Number(ev.pkt_id));
+          dropMarks.push({
+            pkt_id: Number(ev.pkt_id),
+            flow_id: ev.flow_id != null ? Number(ev.flow_id) : null,
+            from: Number(ev.link_from),
+            to: Number(ev.link_to),
+            at: Number(ev.t_ns),
+            until: Number(ev.t_ns) + 2_000_000, // 2ms
+          });
+          lastEventsText.push(
+            `${head} pkt=${ev.pkt_id} link=${ev.link_from}->${ev.link_to} q=${ev.q_bytes}/${ev.q_cap_bytes}`
+          );
+        } else if (kind === "node_rx") {
+          nodeHighlight.set(Number(ev.node), { node: Number(ev.node), until: ev.t_ns + 200_000 /* 0.2ms */ });
+          lastEventsText.push(`${head} node=${ev.node} (${ev.node_kind}:${ev.node_name}) pkt=${ev.pkt_id}`);
+        } else if (kind === "node_forward") {
+          lastEventsText.push(`${head} node=${ev.node} -> next=${ev.next} pkt=${ev.pkt_id}`);
+        } else if (kind === "enqueue") {
+          lastEventsText.push(`${head} pkt=${ev.pkt_id} link=${ev.link_from}->${ev.link_to} q=${ev.q_bytes}/${ev.q_cap_bytes}`);
+        } else if (kind.startsWith("tcp_")) {
+          // tcp_send_data / tcp_send_ack / tcp_recv_ack / tcp_rto
+          const extra = [];
+          if (ev.conn_id != null) extra.push(`conn=${ev.conn_id}`);
+          if (ev.seq != null) extra.push(`seq=${ev.seq}`);
+          if (ev.len != null) extra.push(`len=${ev.len}`);
+          if (ev.ack != null) extra.push(`ack=${ev.ack}`);
+          lastEventsText.push(`${head} ${extra.join(" ")}`.trim());
+        } else {
+          lastEventsText.push(`${head} pkt=${ev.pkt_id ?? "-"}`);
+        }
+      }
+
+      function redraw() {
+        ctx.clearRect(0, 0, cv.width, cv.height);
+
+        // links
+        drawLink(nodeById.get(0), nodeById.get(2));
+        drawLink(nodeById.get(2), nodeById.get(3));
+        drawLink(nodeById.get(3), nodeById.get(1));
+
+        // nodes
+        for (const n of nodes) drawNode(n);
+
+        // packets in flight
+        for (const p of inflight.values()) {
+          drawPacket(p);
+        }
+
+        // drop marks (red X)
+        dropMarks = dropMarks.filter((m) => m.until >= curTime);
+        for (const m of dropMarks) {
+          drawDropMark(m);
+        }
+      }
+
+      function drawLink(a, b) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.18)";
+        ctx.lineWidth = 6;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgba(0,0,0,0.25)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawNode(n) {
+        const hl = nodeHighlight.get(n.id);
+        const isHl = hl && hl.until >= curTime;
+        ctx.save();
+        ctx.fillStyle = isHl ? "rgba(122,162,255,0.35)" : "rgba(255,255,255,0.10)";
+        ctx.strokeStyle = isHl ? "rgba(122,162,255,0.85)" : "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.kind === "switch" ? 26 : 22, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#e7ecff";
+        ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(n.name, n.x, n.y);
+        ctx.restore();
+      }
+
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      function pktColor(kind) {
+        if (kind === "data") return "#7aa2ff";
+        if (kind === "ack") return "#64d49a";
+        return "#cdd6ff";
+      }
+
+      function drawDropMark(m) {
+        const a = nodeById.get(m.from);
+        const b = nodeById.get(m.to);
+        if (!a || !b) return;
+        const x = (a.x + b.x) / 2;
+        const y = (a.y + b.y) / 2;
+
+        ctx.save();
+        ctx.strokeStyle = "#ff6b6b";
+        ctx.lineWidth = 3;
+        ctx.lineCap = "round";
+        const r = 10;
+        ctx.beginPath();
+        ctx.moveTo(x - r, y - r);
+        ctx.lineTo(x + r, y + r);
+        ctx.moveTo(x - r, y + r);
+        ctx.lineTo(x + r, y - r);
+        ctx.stroke();
+
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(`drop pkt=${m.pkt_id}`, x, y + r + 2);
+        ctx.restore();
+      }
+
+      function drawPacket(p) {
+        const a = nodeById.get(p.from);
+        const b = nodeById.get(p.to);
+        if (!a || !b) return;
+
+        const t = (() => {
+          if (curTime <= p.depart) return 0;
+          if (curTime >= p.arrive) return 1;
+          return (curTime - p.depart) / Math.max(1, p.arrive - p.depart);
+        })();
+        const x = lerp(a.x, b.x, t);
+        const y = lerp(a.y, b.y, t);
+
+        ctx.save();
+        ctx.fillStyle = pktColor(p.pkt_kind);
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function tick(ts) {
+        requestAnimationFrame(tick);
+        if (!playing || filtered.length === 0) return;
+        if (!lastWall) lastWall = ts;
+        const dt = ts - lastWall;
+        lastWall = ts;
+
+        const speed = Number(speedEl.value || "1");
+        // dt(ms) -> ns
+        const advance = dt * 1e6 * speed;
+        const target = Math.min(t1, curTime + advance);
+        setTime(target);
+        applyUntil(curTime);
+        redraw();
+        updateStatus();
+        showCurrentText();
+
+        if (curTime >= t1) {
+          playing = false;
+        }
+      }
+
+      requestAnimationFrame(tick);
+
+      fileEl.addEventListener("change", async () => {
+        const f = fileEl.files?.[0];
+        if (!f) return;
+        const text = await f.text();
+        try {
+          const arr = JSON.parse(text);
+          if (!Array.isArray(arr)) throw new Error("JSON 顶层不是数组");
+          events = arr;
+          // sort just in case
+          events.sort((a, b) => (a.t_ns ?? 0) - (b.t_ns ?? 0));
+          t0 = events.length ? events[0].t_ns : 0;
+          t1 = events.length ? events[events.length - 1].t_ns : 0;
+          filtered = events;
+          setEnabled(true);
+          playing = false;
+          lastWall = 0;
+          resetPlayback();
+        } catch (e) {
+          setEnabled(false);
+          statusEl.textContent = "解析失败：" + String(e);
+        }
+      });
+
+      filterFlowEl.addEventListener("input", applyFilter);
+      filterPktEl.addEventListener("input", applyFilter);
+
+      playEl.addEventListener("click", () => {
+        if (filtered.length === 0) return;
+        playing = true;
+        lastWall = 0;
+      });
+      pauseEl.addEventListener("click", () => {
+        playing = false;
+      });
+      stepEl.addEventListener("click", () => {
+        playing = false;
+        stepOnce();
+      });
+
+      sliderEl.addEventListener("input", () => {
+        if (filtered.length === 0) return;
+        playing = false;
+        const p = Number(sliderEl.value) / 1000;
+        const t = t0 + (t1 - t0) * p;
+        setTime(t);
+        applyUntil(curTime);
+        redraw();
+        updateStatus();
+        showCurrentText();
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === " ") {
+          e.preventDefault();
+          playing = !playing;
+          lastWall = 0;
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          playing = false;
+          stepOnce();
+        } else if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          playing = false;
+          // coarse step back: go to previous event time (recompute)
+          if (filtered.length === 0) return;
+          const idx = Math.max(0, cursor - 2);
+          const t = filtered[idx]?.t_ns ?? t0;
+          setTime(t);
+          // force recompute from scratch
+          inflight = new Map();
+          nodeHighlight = new Map();
+          dropMarks = [];
+          lastEventsText = [];
+          cursor = 0;
+          applyUntil(curTime);
+          redraw();
+          updateStatus();
+          showCurrentText();
+        }
+      });
+    </script>
+  </body>
+</html>
+

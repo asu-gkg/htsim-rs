@@ -12,12 +12,18 @@ use super::node::{Host, Node, Switch};
 use super::packet::Packet;
 use super::stats::Stats;
 use super::routing::RoutingTable;
+use crate::proto::tcp::TcpStack;
+use crate::proto::Transport;
+use crate::queue::DropTailQueue;
 use crate::sim::{SimTime, Simulator};
+use crate::viz::{VizEvent, VizEventKind, VizLogger, VizNodeKind, VizPacketKind, VizTcp};
 use tracing::{debug, info, trace};
 
 /// 网络拓扑
 pub struct Network {
     nodes: Vec<Option<Box<dyn Node>>>,
+    node_names: Vec<String>,
+    node_kinds: Vec<VizNodeKind>,
     links: Vec<Link>,
     edges: HashMap<(NodeId, NodeId), LinkId>,
     adj: Vec<Vec<NodeId>>,
@@ -25,12 +31,16 @@ pub struct Network {
     routing: RoutingTable,
     next_pkt_id: u64,
     pub stats: Stats,
+    pub tcp: TcpStack,
+    pub viz: Option<VizLogger>,
 }
 
 impl Default for Network {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
+            node_names: Vec::new(),
+            node_kinds: Vec::new(),
             links: Vec::new(),
             edges: HashMap::new(),
             adj: Vec::new(),
@@ -39,15 +49,98 @@ impl Default for Network {
             routing: RoutingTable::new(0xC5A1_DA7A_5EED_1234),
             next_pkt_id: 0,
             stats: Stats::default(),
+            tcp: TcpStack::default(),
+            viz: None,
         }
     }
 }
 
 impl Network {
+    fn pkt_kind(pkt: &Packet) -> VizPacketKind {
+        match &pkt.transport {
+            Transport::Tcp(crate::proto::TcpSegment::Ack { .. }) => VizPacketKind::Ack,
+            Transport::Tcp(crate::proto::TcpSegment::Data { .. }) => VizPacketKind::Data,
+            _ => VizPacketKind::Other,
+        }
+    }
+
+    fn viz_push(&mut self, ev: VizEvent) {
+        if let Some(v) = &mut self.viz {
+            v.push(ev);
+        }
+    }
+
+    pub(crate) fn viz_tcp_send_data(&mut self, t_ns: u64, conn_id: u64, seq: u64, len: u32) {
+        self.viz_push(VizEvent {
+            t_ns,
+            pkt_id: None,
+            flow_id: Some(conn_id),
+            pkt_bytes: None,
+            pkt_kind: Some(VizPacketKind::Data),
+            kind: VizEventKind::TcpSendData(VizTcp {
+                conn_id,
+                seq: Some(seq),
+                len: Some(len),
+                ack: None,
+            }),
+        });
+    }
+
+    pub(crate) fn viz_tcp_send_ack(&mut self, t_ns: u64, conn_id: u64, ack: u64) {
+        self.viz_push(VizEvent {
+            t_ns,
+            pkt_id: None,
+            flow_id: Some(conn_id),
+            pkt_bytes: None,
+            pkt_kind: Some(VizPacketKind::Ack),
+            kind: VizEventKind::TcpSendAck(VizTcp {
+                conn_id,
+                seq: None,
+                len: None,
+                ack: Some(ack),
+            }),
+        });
+    }
+
+    pub(crate) fn viz_tcp_recv_ack(&mut self, t_ns: u64, conn_id: u64, ack: u64) {
+        self.viz_push(VizEvent {
+            t_ns,
+            pkt_id: None,
+            flow_id: Some(conn_id),
+            pkt_bytes: None,
+            pkt_kind: Some(VizPacketKind::Ack),
+            kind: VizEventKind::TcpRecvAck(VizTcp {
+                conn_id,
+                seq: None,
+                len: None,
+                ack: Some(ack),
+            }),
+        });
+    }
+
+    pub(crate) fn viz_tcp_rto(&mut self, t_ns: u64, conn_id: u64, seq: u64) {
+        self.viz_push(VizEvent {
+            t_ns,
+            pkt_id: None,
+            flow_id: Some(conn_id),
+            pkt_bytes: None,
+            pkt_kind: Some(VizPacketKind::Data),
+            kind: VizEventKind::TcpRto(VizTcp {
+                conn_id,
+                seq: Some(seq),
+                len: None,
+                ack: None,
+            }),
+        });
+    }
+
     /// 添加主机节点
     pub fn add_host(&mut self, name: impl Into<String>) -> NodeId {
+        let name = name.into();
         let id = NodeId(self.nodes.len());
-        self.nodes.push(Some(Box::new(Host::new(id, name))));
+        self.nodes.push(Some(Box::new(Host::new(id, name.clone()))));
+        self.node_names.push(name);
+        self.node_kinds.push(VizNodeKind::Host);
         self.adj.push(Vec::new());
         self.rev_adj.push(Vec::new());
         id
@@ -55,8 +148,11 @@ impl Network {
 
     /// 添加交换机节点
     pub fn add_switch(&mut self, name: impl Into<String>) -> NodeId {
+        let name = name.into();
         let id = NodeId(self.nodes.len());
-        self.nodes.push(Some(Box::new(Switch::new(id, name))));
+        self.nodes.push(Some(Box::new(Switch::new(id, name.clone()))));
+        self.node_names.push(name);
+        self.node_kinds.push(VizNodeKind::Switch);
         self.adj.push(Vec::new());
         self.rev_adj.push(Vec::new());
         id
@@ -77,6 +173,17 @@ impl Network {
         self.rev_adj[to.0].push(from);
         self.routing.mark_dirty();
         id
+    }
+
+    /// 设置某条单向链路的队列容量（字节）。
+    ///
+    /// 用于实验中把“瓶颈链路”改为有限缓冲，从而产生丢包（DropTail）。
+    pub fn set_link_queue_capacity_bytes(&mut self, from: NodeId, to: NodeId, capacity_bytes: u64) {
+        let link_id = *self
+            .edges
+            .get(&(from, to))
+            .unwrap_or_else(|| panic!("no link from {:?} to {:?}", from, to));
+        self.links[link_id.0].queue = Box::new(DropTailQueue::new(capacity_bytes));
     }
 
     /// 创建数据包
@@ -116,11 +223,38 @@ impl Network {
     #[tracing::instrument(skip(self, sim), fields(pkt_id = pkt.id, to = ?to))]
     pub fn deliver(&mut self, to: NodeId, pkt: Packet, sim: &mut Simulator) {
         debug!("📬 将数据包交付给节点处理");
+
+        self.viz_push(VizEvent {
+            t_ns: sim.now().0,
+            pkt_id: Some(pkt.id),
+            flow_id: Some(pkt.flow_id),
+            pkt_bytes: Some(pkt.size_bytes),
+            pkt_kind: Some(Self::pkt_kind(&pkt)),
+            kind: VizEventKind::ArriveNode { node: to.0 },
+        });
         
         // 暂时把节点取出来，避免 &mut self 与 &mut node 的重叠借用。
         let mut node = self.nodes[to.0].take().expect("node exists");
-        let node_name = node.name().to_string();
+        let node_name = self
+            .node_names
+            .get(to.0)
+            .cloned()
+            .unwrap_or_else(|| node.name().to_string());
+        let node_kind = *self.node_kinds.get(to.0).unwrap_or(&VizNodeKind::Switch);
         trace!(node_name = %node_name, "取出节点");
+
+        self.viz_push(VizEvent {
+            t_ns: sim.now().0,
+            pkt_id: Some(pkt.id),
+            flow_id: Some(pkt.flow_id),
+            pkt_bytes: Some(pkt.size_bytes),
+            pkt_kind: Some(Self::pkt_kind(&pkt)),
+            kind: VizEventKind::NodeRx {
+                node: to.0,
+                node_kind,
+                node_name: node_name.clone(),
+            },
+        });
         
         node.on_packet(pkt, sim, self);
         
@@ -147,33 +281,83 @@ impl Network {
             trace!(to = ?nh, cands = ?cands, "动态路由（ECMP）选择下一跳");
             nh
         };
+
+        self.viz_push(VizEvent {
+            t_ns: sim.now().0,
+            pkt_id: Some(pkt.id),
+            flow_id: Some(pkt.flow_id),
+            pkt_bytes: Some(pkt.size_bytes),
+            pkt_kind: Some(Self::pkt_kind(&pkt)),
+            kind: VizEventKind::NodeForward {
+                node: from.0,
+                next: to.0,
+            },
+        });
         
         let link_id = *self
             .edges
             .get(&(from, to))
             .unwrap_or_else(|| panic!("no link from {:?} to {:?}", from, to));
-        let link = &mut self.links[link_id.0];
         debug!(
             link_id = ?link_id,
-            latency = ?link.latency,
-            bandwidth_bps = link.bandwidth_bps,
+            latency = ?self.links[link_id.0].latency,
+            bandwidth_bps = self.links[link_id.0].bandwidth_bps,
             "找到链路"
         );
 
         // 入队：若队列满则直接丢弃（DropTail）
         let now = sim.now();
-        match link.queue.enqueue(pkt) {
+        let (pkt_id, flow_id, pkt_bytes, pkt_kind) =
+            (pkt.id, pkt.flow_id, pkt.size_bytes, Self::pkt_kind(&pkt));
+
+        // 为了避免同时可变借用 `self.links[..]` 与 `self`（写 viz），先把结果与队列状态拷出来
+        let (enqueue_res, q_bytes, q_cap_bytes, q_len) = {
+            let link = &mut self.links[link_id.0];
+            let res = link.queue.enqueue(pkt);
+            let q_bytes = link.queue.bytes();
+            let q_cap_bytes = link.queue.capacity_bytes();
+            let q_len = link.queue.len();
+            (res, q_bytes, q_cap_bytes, q_len)
+        };
+
+        match enqueue_res {
             Ok(()) => {
+                self.viz_push(VizEvent {
+                    t_ns: now.0,
+                    pkt_id: Some(pkt_id),
+                    flow_id: Some(flow_id),
+                    pkt_bytes: Some(pkt_bytes),
+                    pkt_kind: Some(pkt_kind),
+                    kind: VizEventKind::Enqueue {
+                        link_from: from.0,
+                        link_to: to.0,
+                        q_bytes,
+                        q_cap_bytes,
+                    },
+                });
                 trace!(
                     now = ?now,
-                    q_len = link.queue.len(),
-                    q_bytes = link.queue.bytes(),
+                    q_len,
+                    q_bytes,
                     "packet 入队成功"
                 );
             }
             Err(pkt) => {
                 self.stats.dropped_pkts += 1;
                 self.stats.dropped_bytes += pkt.size_bytes as u64;
+                self.viz_push(VizEvent {
+                    t_ns: now.0,
+                    pkt_id: Some(pkt.id),
+                    flow_id: Some(pkt.flow_id),
+                    pkt_bytes: Some(pkt.size_bytes),
+                    pkt_kind: Some(Self::pkt_kind(&pkt)),
+                    kind: VizEventKind::Drop {
+                        link_from: from.0,
+                        link_to: to.0,
+                        q_bytes,
+                        q_cap_bytes,
+                    },
+                });
                 debug!(
                     now = ?now,
                     link_id = ?link_id,
@@ -185,7 +369,7 @@ impl Network {
         }
 
         // 若链路空闲，则立即开始发送队头 packet
-        if now >= link.busy_until {
+        if now >= self.links[link_id.0].busy_until {
             self.transmit_next_on_link(link_id, sim);
         }
     }
@@ -210,10 +394,10 @@ impl Network {
         let now = sim.now();
 
         // 先取出必要的链路参数，避免同时持有 link 的可变借用与 schedule
-        let (to, latency, bandwidth_bps, pkt_opt) = {
+        let (from, to, latency, bandwidth_bps, pkt_opt) = {
             let link = &mut self.links[link_id.0];
             let pkt_opt = link.queue.dequeue();
-            (link.to, link.latency, link.bandwidth_bps, pkt_opt)
+            (link.from, link.to, link.latency, link.bandwidth_bps, pkt_opt)
         };
 
         let Some(pkt) = pkt_opt else {
@@ -233,6 +417,20 @@ impl Network {
         }
         let arrive = SimTime(depart.0.saturating_add(latency.0));
 
+        self.viz_push(VizEvent {
+            t_ns: now.0,
+            pkt_id: Some(pkt.id),
+            flow_id: Some(pkt.flow_id),
+            pkt_bytes: Some(pkt.size_bytes),
+            pkt_kind: Some(Self::pkt_kind(&pkt)),
+            kind: VizEventKind::TxStart {
+                link_from: from.0,
+                link_to: to.0,
+                depart_ns: depart.0,
+                arrive_ns: arrive.0,
+            },
+        });
+
         trace!(
             now = ?now,
             link_id = ?link_id,
@@ -251,9 +449,18 @@ impl Network {
     }
 
     /// 数据包送达目的地时的处理
-    #[tracing::instrument(skip(self), fields(pkt_id = pkt.id, flow_id = pkt.flow_id))]
-    pub(crate) fn on_delivered(&mut self, pkt: Packet) {
+    #[tracing::instrument(skip(self, sim), fields(pkt_id = pkt.id, flow_id = pkt.flow_id))]
+    pub(crate) fn on_delivered(&mut self, at: NodeId, pkt: Packet, sim: &mut Simulator) {
         info!("✅ 数据包送达目的地");
+
+        self.viz_push(VizEvent {
+            t_ns: sim.now().0,
+            pkt_id: Some(pkt.id),
+            flow_id: Some(pkt.flow_id),
+            pkt_bytes: Some(pkt.size_bytes),
+            pkt_kind: Some(Self::pkt_kind(&pkt)),
+            kind: VizEventKind::Delivered { node: at.0 },
+        });
         
         let old_pkts = self.stats.delivered_pkts;
         let old_bytes = self.stats.delivered_bytes;
@@ -269,5 +476,13 @@ impl Network {
             new_delivered_bytes = self.stats.delivered_bytes,
             "更新统计信息"
         );
+
+        // 传输层处理（例如 TCP：目的端产生 ACK、源端处理 ACK 驱动继续发送）
+        if let Transport::Tcp(seg) = pkt.transport {
+            let conn_id = pkt.flow_id;
+            let mut tcp = std::mem::take(&mut self.tcp);
+            tcp.on_tcp_segment(conn_id, at, seg, sim, self);
+            self.tcp = tcp;
+        }
     }
 }
