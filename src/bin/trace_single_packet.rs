@@ -3,9 +3,9 @@
 //! 只发送一个数据包，打印详细的执行流程和调试信息
 
 use clap::Parser;
-use htsim_rs::demo::{build_dumbbell, DumbbellOpts};
-use htsim_rs::net::NetWorld;
+use htsim_rs::net::{NetWorld, NodeId};
 use htsim_rs::sim::{Event, SimTime, Simulator, World};
+use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
 use tracing::{debug, info, trace};
 
 #[derive(Debug, Parser)]
@@ -26,8 +26,8 @@ struct Args {
 #[derive(Debug)]
 struct TraceSinglePacket {
     flow_id: u64,
-    src: htsim_rs::net::NodeId,
-    route: Vec<htsim_rs::net::NodeId>,
+    src: NodeId,
+    route: Vec<NodeId>,
     pkt_bytes: u32,
 }
 
@@ -87,12 +87,12 @@ fn main() {
 
     let opts = DumbbellOpts {
         pkt_bytes: args.pkt_bytes,
-        pkts: 1, // 只发一个包
-        gap: SimTime::ZERO, // 不需要间隔
+        pkts: 1,
+        gap: SimTime::ZERO,
         host_link_gbps: args.host_link_gbps,
         bottleneck_gbps: args.bottleneck_gbps,
         link_latency: SimTime::from_micros(args.link_latency_us),
-        until: SimTime::from_millis(100), // 足够长的时间
+        until: SimTime::from_millis(100),
     };
 
     info!("╔════════════════════════════════════════════════════════════════════════════════╗");
@@ -112,7 +112,7 @@ fn main() {
             flow_id: 1,
             src,
             route,
-            pkt_bytes: opts.pkt_bytes,
+            pkt_bytes: args.pkt_bytes,
         },
     );
 

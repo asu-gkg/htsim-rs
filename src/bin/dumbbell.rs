@@ -3,9 +3,48 @@
 //! 运行 dumbbell 拓扑的单流发包示例
 
 use clap::Parser;
-use htsim_rs::demo::{build_dumbbell, DumbbellOpts, InjectFlow};
-use htsim_rs::net::NetWorld;
-use htsim_rs::sim::{SimTime, Simulator};
+use htsim_rs::net::{NetWorld, NodeId};
+use htsim_rs::sim::{Event, SimTime, Simulator, World};
+use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
+
+/// 流量注入事件
+///
+/// 用于周期性注入数据包
+#[derive(Debug)]
+struct InjectFlow {
+    flow_id: u64,
+    src: NodeId,
+    route: Vec<NodeId>,
+    pkt_bytes: u32,
+    remaining: u64,
+    gap: SimTime,
+}
+
+impl Event for InjectFlow {
+    fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
+        let mut me = *self;
+        let w = world
+            .as_any_mut()
+            .downcast_mut::<NetWorld>()
+            .expect("world must be NetWorld");
+
+        if me.remaining == 0 {
+            return;
+        }
+
+        let pkt = w
+            .net
+            .make_packet(me.flow_id, me.pkt_bytes, me.route.clone());
+        // 从 src 直接发送到下一跳（forward 会 schedule DeliverPacket）
+        w.net.forward_from(me.src, pkt, sim);
+
+        me.remaining -= 1;
+        if me.remaining > 0 {
+            let next_at = SimTime(sim.now().0.saturating_add(me.gap.0));
+            sim.schedule(next_at, InjectFlow { ..me });
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "dumbbell", about = "Dumbbell 拓扑仿真：h0->h1 单流发包")]

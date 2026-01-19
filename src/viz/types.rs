@@ -50,6 +50,14 @@ pub enum VizEventKind {
     TcpRecvAck(VizTcp),
     /// TCP：RTO 超时触发重传
     TcpRto(VizTcp),
+    /// DCTCP：真实 cwnd 采样（避免前端推断偏差）
+    DctcpCwnd {
+        conn_id: u64,
+        cwnd_bytes: u64,
+        ssthresh_bytes: u64,
+        inflight_bytes: u64,
+        alpha: f64,
+    },
 }
 
 /// packet 的类别（便于可视化上色）
@@ -121,4 +129,3 @@ impl VizLogger {
         self.events.push(ev);
     }
 }
-

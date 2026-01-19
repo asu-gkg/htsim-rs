@@ -12,6 +12,7 @@ use super::node::{Host, Node, Switch};
 use super::packet::Packet;
 use super::stats::Stats;
 use super::routing::RoutingTable;
+use crate::proto::dctcp::DctcpStack;
 use crate::proto::tcp::TcpStack;
 use crate::proto::Transport;
 use crate::queue::DropTailQueue;
@@ -32,6 +33,7 @@ pub struct Network {
     next_pkt_id: u64,
     pub stats: Stats,
     pub tcp: TcpStack,
+    pub dctcp: DctcpStack,
     pub viz: Option<VizLogger>,
 }
 
@@ -50,6 +52,7 @@ impl Default for Network {
             next_pkt_id: 0,
             stats: Stats::default(),
             tcp: TcpStack::default(),
+            dctcp: DctcpStack::default(),
             viz: None,
         }
     }
@@ -60,6 +63,8 @@ impl Network {
         match &pkt.transport {
             Transport::Tcp(crate::proto::TcpSegment::Ack { .. }) => VizPacketKind::Ack,
             Transport::Tcp(crate::proto::TcpSegment::Data { .. }) => VizPacketKind::Data,
+            Transport::Dctcp(crate::proto::DctcpSegment::Ack { .. }) => VizPacketKind::Ack,
+            Transport::Dctcp(crate::proto::DctcpSegment::Data { .. }) => VizPacketKind::Data,
             _ => VizPacketKind::Other,
         }
     }
@@ -169,6 +174,31 @@ impl Network {
         });
     }
 
+    pub(crate) fn viz_dctcp_cwnd(
+        &mut self,
+        t_ns: u64,
+        conn_id: u64,
+        cwnd_bytes: u64,
+        ssthresh_bytes: u64,
+        inflight_bytes: u64,
+        alpha: f64,
+    ) {
+        self.viz_push(VizEvent {
+            t_ns,
+            pkt_id: None,
+            flow_id: Some(conn_id),
+            pkt_bytes: None,
+            pkt_kind: None,
+            kind: VizEventKind::DctcpCwnd {
+                conn_id,
+                cwnd_bytes,
+                ssthresh_bytes,
+                inflight_bytes,
+                alpha,
+            },
+        });
+    }
+
     /// 添加主机节点
     pub fn add_host(&mut self, name: impl Into<String>) -> NodeId {
         let name = name.into();
@@ -219,6 +249,50 @@ impl Network {
             .get(&(from, to))
             .unwrap_or_else(|| panic!("no link from {:?} to {:?}", from, to));
         self.links[link_id.0].queue = Box::new(DropTailQueue::new(capacity_bytes));
+    }
+
+    /// 设置所有链路的队列容量（字节）。
+    pub fn set_all_link_queue_capacity_bytes(&mut self, capacity_bytes: u64) {
+        for link in &mut self.links {
+            link.queue = Box::new(DropTailQueue::new(capacity_bytes));
+        }
+    }
+
+    /// 设置某条单向链路的 ECN 标记阈值（bytes）。
+    pub fn set_link_ecn_threshold_bytes(&mut self, from: NodeId, to: NodeId, threshold_bytes: u64) {
+        let link_id = *self
+            .edges
+            .get(&(from, to))
+            .unwrap_or_else(|| panic!("no link from {:?} to {:?}", from, to));
+        self.links[link_id.0].ecn_threshold_bytes = Some(threshold_bytes);
+    }
+
+    /// 设置所有链路的 ECN 标记阈值（bytes）。
+    pub fn set_all_link_ecn_threshold_bytes(&mut self, threshold_bytes: u64) {
+        for link in &mut self.links {
+            link.ecn_threshold_bytes = Some(threshold_bytes);
+        }
+    }
+
+    /// 生成基于 ECMP 的单路径（按最短跳数 + flow_id 选择下一跳）。
+    pub fn route_ecmp_path(&mut self, src: NodeId, dst: NodeId, flow_id: u64) -> Vec<NodeId> {
+        self.routing.ensure_built(&self.adj, &self.rev_adj);
+        let mut path = vec![src];
+        let mut cur = src;
+        let max_hops = self.nodes.len().saturating_add(1);
+        while cur != dst {
+            let cands = self
+                .routing
+                .next_hops(cur, dst)
+                .unwrap_or_else(|| panic!("no route from {:?} to {:?}", cur, dst));
+            let nh = self.routing.pick_ecmp(cur, dst, flow_id, cands);
+            path.push(nh);
+            cur = nh;
+            if path.len() > max_hops {
+                panic!("routing loop from {:?} to {:?} (flow_id={})", src, dst, flow_id);
+            }
+        }
+        path
     }
 
     /// 创建数据包
@@ -299,7 +373,7 @@ impl Network {
 
     /// 从指定节点转发数据包
     #[tracing::instrument(skip(self, sim), fields(pkt_id = pkt.id, from = ?from, hops_taken = pkt.hops_taken, dst = ?pkt.dst))]
-    pub fn forward_from(&mut self, from: NodeId, pkt: Packet, sim: &mut Simulator) {
+    pub fn forward_from(&mut self, from: NodeId, mut pkt: Packet, sim: &mut Simulator) {
         debug!("🚀 从指定节点转发数据包");
 
         let to = if let Some(nh) = pkt.preset_next() {
@@ -348,6 +422,12 @@ impl Network {
         // 为了避免同时可变借用 `self.links[..]` 与 `self`（写 viz），先把结果与队列状态拷出来
         let (enqueue_res, q_bytes, q_cap_bytes, q_len) = {
             let link = &mut self.links[link_id.0];
+            if let Some(th) = link.ecn_threshold_bytes {
+                let q_next = link.queue.bytes().saturating_add(pkt.size_bytes as u64);
+                if q_next >= th {
+                    pkt.mark_ce_if_ect();
+                }
+            }
             let res = link.queue.enqueue(pkt);
             let q_bytes = link.queue.bytes();
             let q_cap_bytes = link.queue.capacity_bytes();
@@ -518,6 +598,12 @@ impl Network {
             let mut tcp = std::mem::take(&mut self.tcp);
             tcp.on_tcp_segment(conn_id, at, seg, sim, self);
             self.tcp = tcp;
+        } else if let Transport::Dctcp(seg) = pkt.transport {
+            let conn_id = pkt.flow_id;
+            let ecn = pkt.ecn;
+            let mut dctcp = std::mem::take(&mut self.dctcp);
+            dctcp.on_dctcp_segment(conn_id, at, seg, ecn, sim, self);
+            self.dctcp = dctcp;
         }
     }
 }

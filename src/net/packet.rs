@@ -13,11 +13,31 @@ pub struct Packet {
     pub size_bytes: u32,
     pub src: NodeId,
     pub dst: NodeId,
+    /// ECN 标记（网络层）
+    pub ecn: Ecn,
     pub routing: Routing,
     /// 传输层标签（例如 TCP 段）。默认 `None`，保持与原有“裸包”逻辑兼容。
     pub transport: Transport,
     /// 已经走过的 hop 数（用于调试/统计）
     pub hops_taken: u32,
+}
+
+/// ECN 码点（简化：只区分 Not-ECT / ECT / CE）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ecn {
+    NotEct,
+    Ect0,
+    Ce,
+}
+
+impl Ecn {
+    pub fn is_ect(self) -> bool {
+        matches!(self, Ecn::Ect0)
+    }
+
+    pub fn is_ce(self) -> bool {
+        matches!(self, Ecn::Ce)
+    }
 }
 
 /// 路由信息：支持预设、动态以及混合（前缀预设 + 余下动态）
@@ -42,6 +62,7 @@ impl Packet {
             size_bytes,
             src,
             dst,
+            ecn: Ecn::NotEct,
             routing: Routing::Preset { path, idx: 0 },
             transport: Transport::None,
             hops_taken: 0,
@@ -56,6 +77,7 @@ impl Packet {
             size_bytes,
             src,
             dst,
+            ecn: Ecn::NotEct,
             routing: Routing::Dynamic,
             transport: Transport::None,
             hops_taken: 0,
@@ -77,9 +99,17 @@ impl Packet {
             size_bytes,
             src,
             dst,
+            ecn: Ecn::NotEct,
             routing: Routing::Mixed { prefix, idx: 0 },
             transport: Transport::None,
             hops_taken: 0,
+        }
+    }
+
+    /// 若支持 ECN，则标记为 CE
+    pub fn mark_ce_if_ect(&mut self) {
+        if self.ecn.is_ect() {
+            self.ecn = Ecn::Ce;
         }
     }
 

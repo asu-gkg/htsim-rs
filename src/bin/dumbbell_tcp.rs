@@ -3,10 +3,10 @@
 //! 运行一个简化 TCP（Reno 风格）在 dumbbell 拓扑上的单流发送。
 
 use clap::Parser;
-use htsim_rs::demo::{build_dumbbell, DumbbellOpts};
 use htsim_rs::net::NetWorld;
 use htsim_rs::proto::tcp::{TcpConfig, TcpConn, TcpStart};
 use htsim_rs::sim::{SimTime, Simulator};
+use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
 use std::fs;
 use std::path::PathBuf;
 
@@ -85,7 +85,6 @@ fn main() {
         link_latency: SimTime::from_micros(args.link_latency_us),
         until: SimTime::from_millis(args.until_ms),
     };
-
     let (src, dst, route) = build_dumbbell(&mut world, &opts);
 
     // 按 C++ 的 -qs 逻辑：把瓶颈链路（s0->s1 及 s1->s0）队列设为有限缓冲
@@ -161,4 +160,3 @@ fn main() {
         world.net.stats.dropped_bytes
     );
 }
-

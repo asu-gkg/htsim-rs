@@ -1,102 +1,76 @@
-# htsim-rs（框架）
+# htsim-rs
 
-这是一个用 Rust 重写/复刻本仓库网络模拟器的**最小可运行框架**：事件驱动内核 + 基础网络组件 + 示例。
-
-更详细的上手说明见 `tutorial.md`。
+Rust 网络仿真框架（事件驱动内核 + 基础网络组件 + 示例）。更详细说明见 `tutorial.md`。
 
 ## 目录结构
-
-- `src/sim/`: 事件队列仿真内核（`Simulator` / `SimTime` / `Event`）
-- `src/net/`: 基础网络对象（`Packet` / `Node` / `Link` / `Network`）
-- `src/demo.rs`: 共享的拓扑构建函数和类型
-- `src/bin/`: 独立的可执行文件
-  - `dumbbell.rs`: Dumbbell 拓扑仿真
-  - `trace_single_packet.rs`: 单包追踪模式
+- `src/sim/`: 事件队列仿真内核（Simulator/Event/World）
+- `src/net/`: 基础网络对象与转发逻辑（Packet/Node/Link/Network）
+- `src/proto/`: 协议原型（TCP）
+- `src/queue/`: 队列模型（DropTail 等）
+- `src/topo/`: 可复用拓扑构建（dumbbell/fat-tree 等）
+- `src/bin/`: 可执行示例
+- `tools/viz/`: 可视化回放页面
 
 ## 运行
-
-项目包含多个独立的可执行文件，每个都有自己的 `main` 函数：
-
-### Dumbbell 拓扑仿真
-
+Dumbbell 拓扑：
 ```bash
-cd htsim-rs
 cargo run --bin dumbbell -- --pkts 10000 --until-ms 50
-```
-
-查看所有参数：
-```bash
 cargo run --bin dumbbell -- --help
 ```
 
-### 单包追踪模式
-
+单包追踪：
 ```bash
-cd htsim-rs
 cargo run --bin trace_single_packet
-```
-
-查看所有参数：
-```bash
 cargo run --bin trace_single_packet -- --help
 ```
 
-使用日志解析器美化输出：
+TCP + 可视化：
 ```bash
-RUST_LOG=trace cargo run --bin trace_single_packet 2>&1 | python3 parse_logs.py
+cargo run --bin dumbbell_tcp -- --viz-json out.json
 ```
 
-你会看到类似输出：
-
-```
-done @ SimTime(...), delivered_pkts=..., delivered_bytes=...
-```
-
-## 下一步建议（你后续要加的东西）
-
-- **协议层**：把 TCP/NDP/Swift/HPCC 等做成独立模块（例如 `proto::tcp`），在 `Node::on_packet` 或专门的 endpoint 中处理 ACK/重传/拥塞控制等。
-- **路由/拓扑**：把 `Packet.route` 从"显式路径"升级为"按目的地查表/ECMP/喷洒"等。
-- **队列/交换机**：把 `Link` 的 `busy_until` 原型升级为可插拔队列（ECN、PFC、优先级、多队列等）。
-- **统计与日志**：在 `World` 中集中统计（FCT、吞吐、排队时延、丢包等），并导出为 CSV/JSON。
-
-## Tracing 日志使用指南
-
-项目已集成 `tracing` 日志库，可以自动记录函数调用、文件位置、行号等信息。
-
-### 基本使用
-
+DCTCP + ECN：
 ```bash
-# 默认 INFO 级别
-cargo run --bin trace_single_packet
+cargo run --bin dumbbell_dctcp -- --ecn-k-pkts 20
+```
 
-# DEBUG 级别（推荐调试时使用）
+可视化（含 DCTCP 丢包场景）：
+```bash
+# 中等队列 + 低阈值 ECN + 适度初始窗口，能看到 ECN 与丢包共存
+cargo run --bin dumbbell_dctcp -- --viz-json out.json --queue-pkts 12 --ecn-k-pkts 4 --init-cwnd-pkts 20 --bottleneck-gbps 5
+```
+
+长时间运行 + cwnd/alpha 采样：
+```bash
+# 大数据量 + 较长仿真时间，输出 cwnd.csv 便于画图
+
+cargo run --bin dumbbell_dctcp -- --quiet \
+--viz-json out.json  \
+--data-bytes 500000000 \
+--until-ms 2000 \
+--link-latency-us 20 \
+--bottleneck-gbps 1 \
+--queue-pkts 12 --ecn-k-pkts 4
+
+```
+
+Fat-tree demo:
+```bash
+cargo run --bin fat_tree
+```
+
+## 日志与解析
+```bash
 RUST_LOG=debug cargo run --bin trace_single_packet
-
-# TRACE 级别（最详细）
-RUST_LOG=trace cargo run --bin trace_single_packet
-```
-
-### 只查看特定模块的日志
-
-```bash
-# 只看网络模块
-RUST_LOG=htsim_rs::net=debug cargo run --bin trace_single_packet
-
-# 只看仿真器模块
-RUST_LOG=htsim_rs::sim=debug cargo run --bin trace_single_packet
-```
-
-## 日志解析器
-
-使用 `parse_logs.py` 美化日志输出：
-
-```bash
-# 基本使用
 RUST_LOG=trace cargo run --bin trace_single_packet 2>&1 | python3 parse_logs.py
 
-# 保存日志到文件再解析
-RUST_LOG=debug cargo run --bin trace_single_packet 2>&1 > logs.txt
-cat logs.txt | python3 parse_logs.py
+
+cargo run --bin fat_tree_allreduce_dctcp -- --quiet  --viz-json out.json --queue-pkts 32 --ecn-k-pkts 8
+
+cargo run --bin fat_tree_allreduce_dctcp -- --quiet  --viz-json out.json --k 4 --ranks 4 --msg-bytes 40000 --chunk-bytes 10000
 ```
 
-详细说明见代码注释和 `tutorial.md`。
+## 下一步（可选）
+- 协议层：完善 TCP/NDP/Swift 等
+- 队列模型：引入 ECN/PFC/多队列
+- 统计输出：导出 CSV/JSON

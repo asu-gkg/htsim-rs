@@ -16,7 +16,7 @@ mod routing;
 
 // 重新导出公共接口
 pub use id::{NodeId, LinkId};
-pub use packet::Packet;
+pub use packet::{Ecn, Packet};
 pub use node::{Node, Host, Switch};
 pub use link::Link;
 pub use stats::Stats;

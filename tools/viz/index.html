@@ -161,6 +161,12 @@
         </div>
 
         <div class="row">
+          <label>2.5) CWND 连接</label>
+          <select id="connPick" disabled></select>
+          <div class="small">自动：优先 flow_id 过滤，否则选第一个连接。</div>
+        </div>
+
+        <div class="row">
           <label>3) 控制</label>
           <div class="btns">
             <button id="play" disabled>播放</button>
@@ -247,6 +253,7 @@
       const jumpDropEl = $("jumpDrop");
       const filterFlowEl = $("filterFlow");
       const filterPktEl = $("filterPkt");
+      const connPickEl = $("connPick");
       const cv = $("cv");
       const ctx = cv.getContext("2d");
       const tcpCv = $("tcpCv");
@@ -277,13 +284,21 @@
       /** @type {{nodes?: any[], links?: any[]}|null} */
       let meta = null;
       /** @type {any[]} */
-      let nodes = [
+      const defaultNodes = [
         { id: 0, name: "h0", kind: "host", x: 120, y: 180 },
         { id: 2, name: "s0", kind: "switch", x: 380, y: 180 },
         { id: 3, name: "s1", kind: "switch", x: 720, y: 180 },
         { id: 1, name: "h1", kind: "host", x: 980, y: 180 },
       ];
+      let nodes = defaultNodes.map((n) => ({ ...n }));
       let nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const defaultLinks = [
+        { from: 0, to: 2 },
+        { from: 2, to: 3 },
+        { from: 3, to: 1 },
+      ];
+      let drawLinks = defaultLinks.slice();
+      let nodeScale = 1;
 
       // 统计状态（由事件增量更新）
       /** @type {Map<number, any>} */
@@ -293,7 +308,7 @@
       /** @type {{send_data:number, send_ack:number, recv_ack:number, rto:number}} */
       let tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
 
-      // TCP 时序（从 tcp_* 事件推演 cwnd/state，不改 Rust 侧协议实现）
+      // cwnd 时序（优先使用 dctcp_cwnd 采样；否则从 tcp_* 事件推演）
       /** @type {Map<number, {mss:number, points:Array<any>}>} */
       let tcpSeries = new Map();
 
@@ -327,6 +342,148 @@
         return fmtBytes(n);
       }
 
+      function buildLinkPairs(links) {
+        if (!links || !Array.isArray(links)) return [];
+        const out = [];
+        const seen = new Set();
+        for (const l of links) {
+          const a = Number(l.from);
+          const b = Number(l.to);
+          if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ from: a, to: b });
+        }
+        return out;
+      }
+
+      function parseFatTreeName(name) {
+        if (!name) return null;
+        let m = /^c(\d+)_(\d+)$/.exec(name);
+        if (m) return { kind: "core", group: Number(m[1]), index: Number(m[2]) };
+        m = /^p(\d+)_a(\d+)$/.exec(name);
+        if (m) return { kind: "agg", pod: Number(m[1]), index: Number(m[2]) };
+        m = /^p(\d+)_e(\d+)$/.exec(name);
+        if (m) return { kind: "edge", pod: Number(m[1]), index: Number(m[2]) };
+        m = /^h(\d+)_(\d+)_(\d+)$/.exec(name);
+        if (m) return { kind: "host", pod: Number(m[1]), edge: Number(m[2]), index: Number(m[3]) };
+        return null;
+      }
+
+      function layoutFatTree(list) {
+        const parsed = list.map((it) => ({ it, info: parseFatTreeName(it.name ?? "") }));
+        if (parsed.some((p) => !p.info)) return null;
+        let maxPod = -1;
+        let maxAgg = -1;
+        let maxEdge = -1;
+        let maxCoreGroup = -1;
+        let maxCoreIndex = -1;
+        let maxHost = -1;
+        for (const p of parsed) {
+          const info = p.info;
+          if (info.kind === "core") {
+            maxCoreGroup = Math.max(maxCoreGroup, info.group);
+            maxCoreIndex = Math.max(maxCoreIndex, info.index);
+          } else if (info.kind === "agg") {
+            maxPod = Math.max(maxPod, info.pod);
+            maxAgg = Math.max(maxAgg, info.index);
+          } else if (info.kind === "edge") {
+            maxPod = Math.max(maxPod, info.pod);
+            maxEdge = Math.max(maxEdge, info.index);
+          } else if (info.kind === "host") {
+            maxPod = Math.max(maxPod, info.pod);
+            maxEdge = Math.max(maxEdge, info.edge);
+            maxHost = Math.max(maxHost, info.index);
+          }
+        }
+        const k = maxPod + 1;
+        const half = Math.max(maxAgg, maxEdge, maxCoreGroup, maxCoreIndex, maxHost) + 1;
+        if (k <= 0 || half <= 0) return null;
+
+        const width = cv.width;
+        const height = cv.height;
+        const left = 50;
+        const right = 50;
+        const top = 36;
+        const bottom = 36;
+        const spanH = Math.max(1, height - top - bottom);
+        const rowGap = spanH / 3;
+        const rowY = {
+          core: top,
+          agg: top + rowGap,
+          edge: top + rowGap * 2,
+          host: top + rowGap * 3,
+        };
+        const podWidth = (width - left - right) / Math.max(1, k);
+        const coreGroupWidth = (width - left - right) / Math.max(1, half);
+
+        function xForCore(group, index) {
+          const groupLeft = left + coreGroupWidth * group;
+          return groupLeft + coreGroupWidth * (index + 0.5) / Math.max(1, half);
+        }
+
+        function xForPod(pod, index) {
+          const podLeft = left + podWidth * pod;
+          return podLeft + podWidth * (index + 0.5) / Math.max(1, half);
+        }
+
+        function xForHost(pod, edge, host) {
+          const podLeft = left + podWidth * pod;
+          const edgeSpan = podWidth / Math.max(1, half);
+          const hostSpan = edgeSpan / Math.max(1, half);
+          return podLeft + edgeSpan * edge + hostSpan * (host + 0.5);
+        }
+
+        const nodes = parsed.map(({ it, info }) => {
+          let x = width / 2;
+          let y = height / 2;
+          if (info.kind === "core") {
+            x = xForCore(info.group, info.index);
+            y = rowY.core;
+          } else if (info.kind === "agg") {
+            x = xForPod(info.pod, info.index);
+            y = rowY.agg;
+          } else if (info.kind === "edge") {
+            x = xForPod(info.pod, info.index);
+            y = rowY.edge;
+          } else if (info.kind === "host") {
+            x = xForHost(info.pod, info.edge, info.index);
+            y = rowY.host;
+          }
+          return {
+            id: it.id,
+            name: it.name ?? `n${it.id}`,
+            kind: it.kind ?? "switch",
+            x,
+            y,
+          };
+        });
+        const scale = Math.max(0.5, Math.min(1, 12 / Math.sqrt(Math.max(1, nodes.length))));
+        return { nodes, scale };
+      }
+
+      function layoutCircle(list) {
+        const width = cv.width;
+        const height = cv.height;
+        const cx = width / 2;
+        const cy = height / 2;
+        const r = Math.min(width, height) * 0.35;
+        const n = Math.max(1, list.length);
+        const nodes = list.map((it, i) => {
+          const ang = (Math.PI * 2 * i) / n - Math.PI / 2;
+          return {
+            id: it.id,
+            name: it.name ?? `n${it.id}`,
+            kind: it.kind ?? "switch",
+            x: cx + r * Math.cos(ang),
+            y: cy + r * Math.sin(ang),
+          };
+        });
+        const scale = Math.max(0.5, Math.min(1, 16 / Math.sqrt(n)));
+        return { nodes, scale };
+      }
+
       function setEnabled(ok) {
         playEl.disabled = !ok;
         pauseEl.disabled = !ok;
@@ -335,6 +492,23 @@
         targetWallSecEl.disabled = !ok;
         sliderEl.disabled = !ok;
         jumpDropEl.disabled = !ok;
+        connPickEl.disabled = !ok;
+      }
+
+      function updateConnPick() {
+        const conns = Array.from(tcpSeries.keys()).sort((a, b) => a - b);
+        const prev = connPickEl.value || "auto";
+        connPickEl.innerHTML = "";
+        connPickEl.appendChild(new Option("auto", "auto"));
+        for (const cid of conns) {
+          connPickEl.appendChild(new Option(String(cid), String(cid)));
+        }
+        if (prev !== "auto" && conns.includes(Number(prev))) {
+          connPickEl.value = prev;
+        } else {
+          connPickEl.value = "auto";
+        }
+        connPickEl.disabled = conns.length === 0;
       }
 
       function applyFilter() {
@@ -364,6 +538,7 @@
         linkStats = new Map();
         tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
         tcpSeries = buildTcpSeries(events);
+        updateConnPick();
         initStatsFromMeta();
         cursor = 0;
         curTime = t0;
@@ -469,16 +644,30 @@
 
         const conns = Array.from(tcpSeries.keys()).sort((a, b) => a - b);
         const prefer = filterFlowEl.value.trim() ? Number(filterFlowEl.value.trim()) : null;
-        const cid = prefer != null && tcpSeries.has(prefer) ? prefer : conns[0];
+        const pick = connPickEl.value;
+        let cid = null;
+        if (pick && pick !== "auto") {
+          const pickN = Number(pick);
+          if (tcpSeries.has(pickN)) cid = pickN;
+        }
+        if (cid == null && prefer != null && tcpSeries.has(prefer)) {
+          cid = prefer;
+        }
         if (cid == null) {
-          drawTcpBox("TCP 时序：无 tcp_* 事件");
+          cid = pickAutoConn(tcpSeries, curTime);
+        }
+        if (cid == null) {
+          cid = conns[0];
+        }
+        if (cid == null) {
+          drawTcpBox("cwnd 时序：无 tcp_* / dctcp_cwnd 事件");
           return;
         }
         const ser = tcpSeries.get(cid);
         const pts = ser?.points || [];
         const mss = ser?.mss || 1460;
         if (pts.length === 0) {
-          drawTcpBox(`TCP 时序：conn=${cid} 无可用数据点`);
+          drawTcpBox(`cwnd 时序：conn=${cid} 无可用数据点`);
           return;
         }
 
@@ -509,7 +698,7 @@
         }
         tcpCtx.textAlign = "left";
         tcpCtx.textBaseline = "top";
-        tcpCtx.fillText(`TCP cwnd 时序（conn=${cid}，mss≈${mss}B）`, pad.l, 6);
+        tcpCtx.fillText(`cwnd 时序（conn=${cid}，mss≈${mss}B）`, pad.l, 6);
         tcpCtx.restore();
 
         // 线条：cwnd / ssthresh / inflight
@@ -532,8 +721,12 @@
           tcpCtx.stroke();
           tcpCtx.restore();
 
+          const state = curP.state ?? "-";
+          const lastAck = curP.lastAck ?? "-";
+          const dup = curP.dup ?? "-";
+          const alpha = curP.alpha != null ? `  alpha=${Number(curP.alpha).toFixed(3)}` : "";
           drawTcpBox(
-            `state=${curP.state}  cwnd=${fmtBytes(curP.cwnd)} (${(curP.cwnd / mss).toFixed(2)} pkts)  ssthresh=${fmtBytes(curP.ssthresh)}  inflight=${fmtBytes(curP.inflight)}  lastAck=${curP.lastAck}  dupAck=${curP.dup}`
+            `state=${state}  cwnd=${fmtBytes(curP.cwnd)} (${(curP.cwnd / mss).toFixed(2)} pkts)  ssthresh=${fmtBytes(curP.ssthresh)}  inflight=${fmtBytes(curP.inflight)}  lastAck=${lastAck}  dupAck=${dup}${alpha}`
           );
         }
       }
@@ -595,12 +788,37 @@
         return ans;
       }
 
+      function pickAutoConn(series, t) {
+        let bestCid = null;
+        let bestPast = -Infinity;
+        let bestFuture = Infinity;
+        for (const [cid, ser] of series.entries()) {
+          const pts = ser?.points || [];
+          if (pts.length === 0) continue;
+          const last = pickPointAt(pts, t);
+          if (last) {
+            const ts = Number(last.t ?? 0);
+            if (ts >= bestPast) {
+              bestPast = ts;
+              bestCid = cid;
+            }
+          } else if (bestPast === -Infinity) {
+            const first = Number(pts[0].t ?? 0);
+            if (first < bestFuture) {
+              bestFuture = first;
+              bestCid = cid;
+            }
+          }
+        }
+        return bestCid;
+      }
+
       function buildTcpSeries(evts) {
         /** @type {Map<number, any[]>} */
         const byConn = new Map();
         for (const e of evts) {
           if (!e || typeof e.kind !== "string") continue;
-          if (!e.kind.startsWith("tcp_")) continue;
+          if (!e.kind.startsWith("tcp_") && e.kind !== "dctcp_cwnd") continue;
           const cid = Number(e.conn_id ?? e.flow_id ?? 0);
           if (!cid) continue;
           if (!byConn.has(cid)) byConn.set(cid, []);
@@ -610,6 +828,22 @@
         for (const [cid, arr] of byConn.entries()) {
           arr.sort((a, b) => (a.t_ns ?? 0) - (b.t_ns ?? 0));
           const mss = inferMss(arr) || 1460;
+          const cwndSamples = arr.filter((e) => e.kind === "dctcp_cwnd");
+          if (cwndSamples.length) {
+            const pts = cwndSamples.map((e) => ({
+              t: Number(e.t_ns ?? 0),
+              cwnd: Number(e.cwnd_bytes ?? 0),
+              ssthresh: Number(e.ssthresh_bytes ?? 0),
+              inflight: Number(e.inflight_bytes ?? 0),
+              alpha: e.alpha != null ? Number(e.alpha) : null,
+              lastAck: null,
+              dup: null,
+              state: "DCTCP",
+              reason: "sample",
+            }));
+            out.set(cid, { mss, points: pts });
+            continue;
+          }
           const initCwnd = inferInitCwnd(arr, mss);
           let cwnd = initCwnd;
           let ssthresh = 1000 * mss;
@@ -835,6 +1069,8 @@
           if (ev.q_cap_bytes != null) ls.q_cap = Number(ev.q_cap_bytes);
           ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
           linkStats.set(lk, ls);
+        } else if (kind === "dctcp_cwnd") {
+          // cwnd 采样事件仅用于时序图展示
         } else if (kind.startsWith("tcp_")) {
           // tcp_send_data / tcp_send_ack / tcp_recv_ack / tcp_rto
           const extra = [];
@@ -869,9 +1105,9 @@
         ctx.clearRect(0, 0, cv.width, cv.height);
 
         // links
-        drawLink(nodeById.get(0), nodeById.get(2));
-        drawLink(nodeById.get(2), nodeById.get(3));
-        drawLink(nodeById.get(3), nodeById.get(1));
+        for (const l of drawLinks) {
+          drawLink(nodeById.get(l.from), nodeById.get(l.to));
+        }
 
         // nodes
         for (const n of nodes) drawNode(n);
@@ -903,6 +1139,7 @@
       }
 
       function drawLink(a, b) {
+        if (!a || !b) return;
         ctx.save();
         ctx.strokeStyle = "rgba(255,255,255,0.18)";
         ctx.lineWidth = 6;
@@ -924,17 +1161,19 @@
       function drawNode(n) {
         const hl = nodeHighlight.get(n.id);
         const isHl = hl && hl.until >= curTime;
+        const r = (n.kind === "switch" ? 26 : 22) * nodeScale;
+        const fontSize = Math.max(8, Math.round(12 * nodeScale));
         ctx.save();
         ctx.fillStyle = isHl ? "rgba(122,162,255,0.35)" : "rgba(255,255,255,0.10)";
         ctx.strokeStyle = isHl ? "rgba(122,162,255,0.85)" : "rgba(255,255,255,0.22)";
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.kind === "switch" ? 26 : 22, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
 
         ctx.fillStyle = "#e7ecff";
-        ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace";
+        ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(n.name, n.x, n.y);
@@ -1026,7 +1265,7 @@
         ctx.strokeStyle = "rgba(0,0,0,0.35)";
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(x, y, 7, 0, Math.PI * 2);
+        ctx.arc(x, y, Math.max(3, 7 * nodeScale), 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
         ctx.restore();
@@ -1080,22 +1319,19 @@
           filtered = events;
           // 用 meta 里的节点信息（若存在）重建画布节点
           if (meta?.nodes && Array.isArray(meta.nodes)) {
-            // 简单布局：按 id 排序水平摆放（dumbbell 仍会很直观）
             const list = meta.nodes.slice().sort((a, b) => a.id - b.id);
-            const leftX = 120;
-            const rightX = 980;
-            const y = 180;
-            const n = Math.max(1, list.length);
-            const step = n === 1 ? 0 : (rightX - leftX) / (n - 1);
-            nodes = list.map((it, i) => ({
-              id: it.id,
-              name: it.name ?? `n${it.id}`,
-              kind: it.kind ?? "switch",
-              x: leftX + step * i,
-              y,
-            }));
+            const fat = layoutFatTree(list);
+            const layout = fat ?? layoutCircle(list);
+            nodes = layout.nodes;
+            nodeScale = layout.scale;
+            nodeById = new Map(nodes.map((n) => [n.id, n]));
+          } else {
+            nodes = defaultNodes.map((n) => ({ ...n }));
+            nodeScale = 1;
             nodeById = new Map(nodes.map((n) => [n.id, n]));
           }
+          const pairs = buildLinkPairs(meta?.links);
+          drawLinks = pairs.length ? pairs : defaultLinks.slice();
           setEnabled(true);
           playing = false;
           lastWall = 0;
@@ -1130,6 +1366,7 @@
         linkStats = new Map();
         tcpStats = { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0 };
         tcpSeries = buildTcpSeries(events);
+        updateConnPick();
         initStatsFromMeta();
         cursor = 0;
         applyUntil(curTime);
@@ -1141,6 +1378,10 @@
       }
 
       jumpDropEl.addEventListener("click", jumpToNextDrop);
+
+      connPickEl.addEventListener("change", () => {
+        redrawTcp();
+      });
 
       filterFlowEl.addEventListener("input", applyFilter);
       filterPktEl.addEventListener("input", applyFilter);
@@ -1213,4 +1454,3 @@
     </script>
   </body>
 </html>
-

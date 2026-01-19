@@ -14,6 +14,8 @@ pub struct Link {
     pub latency: SimTime,
     pub bandwidth_bps: u64,
     pub busy_until: SimTime,
+    /// ECN 标记阈值（bytes）。None 表示不开启 ECN 标记。
+    pub ecn_threshold_bytes: Option<u64>,
     /// 链路上的排队策略（默认 DropTail，容量极大，行为与旧逻辑一致但可扩展）
     pub queue: Box<dyn PacketQueue>,
 }
@@ -27,6 +29,7 @@ impl Link {
             latency,
             bandwidth_bps,
             busy_until: SimTime::ZERO,
+            ecn_threshold_bytes: None,
             queue: Box::new(DropTailQueue::new(u64::MAX)),
         }
     }
