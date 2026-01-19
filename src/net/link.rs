@@ -3,7 +3,7 @@
 //! 定义网络链路及其传输时延计算。
 
 use super::id::NodeId;
-use crate::queue::{DropTailQueue, PacketQueue};
+use crate::queue::{mem_from_pkt, DropTailQueue, PacketQueue};
 use crate::sim::SimTime;
 
 /// 网络链路
@@ -30,7 +30,7 @@ impl Link {
             bandwidth_bps,
             busy_until: SimTime::ZERO,
             ecn_threshold_bytes: None,
-            queue: Box::new(DropTailQueue::new(u64::MAX)),
+            queue: Box::new(DropTailQueue::new(mem_from_pkt(8))),
         }
     }
 

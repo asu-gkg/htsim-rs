@@ -74,6 +74,9 @@ impl Network {
         match &pkt.transport {
             Transport::Tcp(crate::proto::TcpSegment::Ack { .. }) => VizPacketKind::Ack,
             Transport::Tcp(crate::proto::TcpSegment::Data { .. }) => VizPacketKind::Data,
+            Transport::Tcp(crate::proto::TcpSegment::Syn) => VizPacketKind::Ack,
+            Transport::Tcp(crate::proto::TcpSegment::SynAck) => VizPacketKind::Ack,
+            Transport::Tcp(crate::proto::TcpSegment::HandshakeAck) => VizPacketKind::Ack,
             Transport::Dctcp(crate::proto::DctcpSegment::Ack { .. }) => VizPacketKind::Ack,
             Transport::Dctcp(crate::proto::DctcpSegment::Data { .. }) => VizPacketKind::Data,
             _ => VizPacketKind::Other,

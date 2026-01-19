@@ -22,6 +22,12 @@ pub enum Transport {
 /// TCP 段（极简：只保留实验需要的字段）
 #[derive(Debug, Clone)]
 pub enum TcpSegment {
+    /// SYN
+    Syn,
+    /// SYN-ACK
+    SynAck,
+    /// ACK for handshake
+    HandshakeAck,
     /// 数据段：`seq` 是字节序号（从 0 开始），`len` 为有效载荷字节数
     Data { seq: u64, len: u32 },
     /// ACK 段：`ack` 是期望的下一个字节序号（累计确认）

@@ -359,7 +359,7 @@ fn main() {
 
     if !args.quiet {
         println!(
-            "done @ {:?}\n  ranks={}, msg_bytes={}, chunk_bytes={}, steps={}\n  fct_ms={:?}, reduce_scatter_ms={:?}\n  net: delivered_pkts={}, delivered_bytes={}, dropped_pkts={}, dropped_bytes={}",
+            "done @ {:?}\n  ranks={}, msg_bytes={}, chunk_bytes={}, steps={}\n  makespan_ms={:?}, reduce_scatter_ms={:?}\n  net: delivered_pkts={}, delivered_bytes={}, dropped_pkts={}, dropped_bytes={}",
             sim.now(),
             ranks,
             args.msg_bytes,

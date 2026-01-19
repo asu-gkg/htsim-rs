@@ -15,6 +15,7 @@ Rust 网络仿真框架（事件驱动内核 + 基础网络组件 + 示例）。
 Dumbbell 拓扑：
 ```bash
 cargo run --bin dumbbell -- --pkts 10000 --until-ms 50
+cargo run --bin dumbbell_tcp -- --handshake --app-limited-pps 2000  --viz-json out.json
 cargo run --bin dumbbell -- --help
 ```
 
@@ -67,7 +68,14 @@ RUST_LOG=trace cargo run --bin trace_single_packet 2>&1 | python3 parse_logs.py
 
 cargo run --bin fat_tree_allreduce_dctcp -- --quiet  --viz-json out.json --queue-pkts 32 --ecn-k-pkts 8
 
-cargo run --bin fat_tree_allreduce_dctcp -- --quiet  --viz-json out.json --k 4 --ranks 4 --msg-bytes 40000 --chunk-bytes 10000
+cargo run --bin fat_tree_allreduce_dctcp -- --quiet  --viz-json out.json --k 4 --ranks 16 --msg-bytes 40000 --chunk-bytes 10000  --queue-pkts 32 --ecn-k-pkts 8
+```
+
+
+```
+
+python3 tools/plot_allreduce_tcp.py --routing per-flow
+
 ```
 
 ## 下一步（可选）
