@@ -20,7 +20,7 @@ pub use packet::{Ecn, Packet};
 pub use node::{Node, Host, Switch};
 pub use link::Link;
 pub use stats::Stats;
-pub use network::Network;
+pub use network::{EcmpHashMode, Network};
 pub use deliver_packet::DeliverPacket;
 pub use net_world::NetWorld;
 pub use link_ready::LinkReady;

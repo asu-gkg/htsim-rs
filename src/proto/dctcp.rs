@@ -37,6 +37,12 @@ pub struct DctcpConfig {
     pub g: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DctcpRoutingMode {
+    Preset,
+    Dynamic,
+}
+
 impl Default for DctcpConfig {
     fn default() -> Self {
         let mss = 1460;
@@ -64,6 +70,7 @@ pub struct DctcpConn {
     pub dst: NodeId,
     pub fwd_route: Vec<NodeId>,
     pub rev_route: Vec<NodeId>,
+    pub routing_mode: DctcpRoutingMode,
     pub total_bytes: u64,
     pub cfg: DctcpConfig,
 
@@ -112,6 +119,47 @@ impl DctcpConn {
             dst,
             fwd_route,
             rev_route,
+            routing_mode: DctcpRoutingMode::Preset,
+            total_bytes,
+            cfg,
+            next_seq: 0,
+            last_acked: 0,
+            cwnd_bytes: cwnd,
+            ssthresh_bytes: ssthresh,
+            dup_acks: 0,
+            rto: init_rto,
+            inflight: BTreeMap::new(),
+            alpha: 0.0,
+            window_end,
+            acked_in_window: 0,
+            marked_in_window: 0,
+            cwnd_log: None,
+            rcv_nxt: 0,
+            start_at: None,
+            done_at: None,
+        }
+    }
+
+    pub fn new_dynamic(
+        id: DctcpConnId,
+        src: NodeId,
+        dst: NodeId,
+        total_bytes: u64,
+        cfg: DctcpConfig,
+    ) -> Self {
+        let fwd_route = vec![src, dst];
+        let rev_route = vec![dst, src];
+        let init_rto = cfg.init_rto;
+        let cwnd = cfg.init_cwnd_bytes.max(cfg.mss as u64);
+        let ssthresh = cfg.init_ssthresh_bytes.max(cfg.mss as u64);
+        let window_end = cwnd;
+        Self {
+            id,
+            src,
+            dst,
+            fwd_route,
+            rev_route,
+            routing_mode: DctcpRoutingMode::Dynamic,
             total_bytes,
             cfg,
             next_seq: 0,
@@ -162,6 +210,20 @@ impl DctcpConn {
 
     fn inflight_bytes(&self) -> u64 {
         self.inflight.values().map(|s| s.len as u64).sum()
+    }
+
+    fn make_data_packet(&self, net: &mut Network) -> crate::net::Packet {
+        match self.routing_mode {
+            DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone()),
+            DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst),
+        }
+    }
+
+    fn make_ack_packet(&self, net: &mut Network) -> crate::net::Packet {
+        match self.routing_mode {
+            DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone()),
+            DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src),
+        }
     }
 
     pub(crate) fn record_cwnd(&mut self, now: SimTime) {
@@ -273,7 +335,7 @@ impl DctcpStack {
             conn.next_seq = conn.next_seq.saturating_add(len as u64);
             avail = avail.saturating_sub(len as u64);
 
-            let mut pkt = net.make_packet(conn.id, conn.cfg.mss, conn.fwd_route.clone());
+            let mut pkt = conn.make_data_packet(net);
             pkt.size_bytes = conn.cfg.mss;
             pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len });
             pkt.ecn = Ecn::Ect0;
@@ -307,7 +369,7 @@ impl DctcpStack {
         let Some(conn) = self.conns.get(&id) else {
             return;
         };
-        let mut pkt = net.make_packet(conn.id, conn.cfg.ack_bytes, conn.rev_route.clone());
+        let mut pkt = conn.make_ack_packet(net);
         pkt.size_bytes = conn.cfg.ack_bytes;
         pkt.transport = Transport::Dctcp(DctcpSegment::Ack { ack, ecn_echo });
 
@@ -440,7 +502,7 @@ impl DctcpStack {
                                 .get(&seq0)
                                 .map(|s| s.len)
                                 .unwrap_or(conn.cfg.mss);
-                            let mut pkt = net.make_packet(conn.id, conn.cfg.mss, conn.fwd_route.clone());
+                            let mut pkt = conn.make_data_packet(net);
                             pkt.size_bytes = conn.cfg.mss;
                             pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq: seq0, len });
                             pkt.ecn = Ecn::Ect0;
@@ -554,7 +616,7 @@ impl Event for DctcpRto {
             conn.alpha,
         );
 
-        let mut pkt = w.net.make_packet(conn.id, conn.cfg.mss, conn.fwd_route.clone());
+        let mut pkt = conn.make_data_packet(&mut w.net);
         pkt.size_bytes = conn.cfg.mss;
         pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len: sent.len });
         pkt.ecn = Ecn::Ect0;

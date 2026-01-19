@@ -20,6 +20,15 @@ use crate::sim::{SimTime, Simulator};
 use crate::viz::{VizEvent, VizEventKind, VizLinkInfo, VizLogger, VizNodeInfo, VizNodeKind, VizPacketKind, VizTcp};
 use tracing::{debug, info, trace};
 
+/// ECMP 哈希的粒度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcmpHashMode {
+    /// 按 flow_id（默认，per-flow ECMP）
+    Flow,
+    /// 按 packet（包含 pkt_id，per-packet ECMP）
+    Packet,
+}
+
 /// 网络拓扑
 pub struct Network {
     nodes: Vec<Option<Box<dyn Node>>>,
@@ -35,6 +44,7 @@ pub struct Network {
     pub tcp: TcpStack,
     pub dctcp: DctcpStack,
     pub viz: Option<VizLogger>,
+    ecmp_hash_mode: EcmpHashMode,
 }
 
 impl Default for Network {
@@ -54,6 +64,7 @@ impl Default for Network {
             tcp: TcpStack::default(),
             dctcp: DctcpStack::default(),
             viz: None,
+            ecmp_hash_mode: EcmpHashMode::Flow,
         }
     }
 }
@@ -108,6 +119,11 @@ impl Network {
             pkt_kind: None,
             kind: VizEventKind::Meta { nodes, links },
         });
+    }
+
+    /// 设置 ECMP 哈希粒度（per-flow / per-packet）。
+    pub fn set_ecmp_hash_mode(&mut self, mode: EcmpHashMode) {
+        self.ecmp_hash_mode = mode;
     }
 
     pub(crate) fn viz_tcp_send_data(&mut self, t_ns: u64, conn_id: u64, seq: u64, len: u32) {
@@ -285,7 +301,7 @@ impl Network {
                 .routing
                 .next_hops(cur, dst)
                 .unwrap_or_else(|| panic!("no route from {:?} to {:?}", cur, dst));
-            let nh = self.routing.pick_ecmp(cur, dst, flow_id, cands);
+            let nh = self.routing.pick_ecmp_with_key(cur, dst, flow_id, cands);
             path.push(nh);
             cur = nh;
             if path.len() > max_hops {
@@ -386,7 +402,11 @@ impl Network {
                 .routing
                 .next_hops(from, pkt.dst)
                 .unwrap_or_else(|| panic!("no route from {:?} to {:?}", from, pkt.dst));
-            let nh = self.routing.pick_ecmp(from, pkt.dst, pkt.flow_id, cands);
+            let key = match self.ecmp_hash_mode {
+                EcmpHashMode::Flow => pkt.flow_id,
+                EcmpHashMode::Packet => pkt.flow_id ^ pkt.id,
+            };
+            let nh = self.routing.pick_ecmp_with_key(from, pkt.dst, key, cands);
             trace!(to = ?nh, cands = ?cands, "动态路由（ECMP）选择下一跳");
             nh
         };

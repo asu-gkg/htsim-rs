@@ -1,7 +1,7 @@
 //! Fat-tree ring allreduce with DCTCP flows.
 
-use clap::Parser;
-use htsim_rs::net::NetWorld;
+use clap::{Parser, ValueEnum};
+use htsim_rs::net::{EcmpHashMode, NetWorld};
 use htsim_rs::proto::dctcp::{DctcpConfig, DctcpConn, DctcpDoneCallback};
 use htsim_rs::sim::{Event, SimTime, Simulator, World};
 use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
@@ -84,6 +84,16 @@ struct Args {
     /// Disable tracing and summary output
     #[arg(long)]
     quiet: bool,
+
+    /// ECMP routing mode
+    #[arg(long, value_enum, default_value_t = RoutingMode::PerPacket)]
+    routing: RoutingMode,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RoutingMode {
+    PerFlow,
+    PerPacket,
 }
 
 #[derive(Clone)]
@@ -92,6 +102,7 @@ struct CollectiveState {
     hosts: Vec<htsim_rs::net::NodeId>,
     chunk_bytes: u64,
     cfg: DctcpConfig,
+    routing: RoutingMode,
     step: usize,
     inflight: usize,
     next_flow_id: u64,
@@ -123,6 +134,7 @@ struct StepContext {
     chunk_bytes: u64,
     cfg: DctcpConfig,
     start_flow_id: u64,
+    routing: RoutingMode,
     probe: Option<(usize, usize)>,
 }
 
@@ -161,6 +173,7 @@ impl Event for StartStep {
                 chunk_bytes: st.chunk_bytes,
                 cfg: st.cfg.clone(),
                 start_flow_id,
+                routing: st.routing,
                 probe: st.probe,
             }
         };
@@ -179,8 +192,15 @@ impl Event for StartStep {
             let flow_id = ctx.start_flow_id + rank as u64;
             let src = ctx.hosts[rank];
             let dst = ctx.hosts[(rank + 1) % ctx.ranks];
-            let route = w.net.route_ecmp_path(src, dst, flow_id);
-            let mut conn = DctcpConn::new(flow_id, src, dst, route, ctx.chunk_bytes, ctx.cfg.clone());
+            let mut conn = match ctx.routing {
+                RoutingMode::PerFlow => {
+                    let route = w.net.route_ecmp_path(src, dst, flow_id);
+                    DctcpConn::new(flow_id, src, dst, route, ctx.chunk_bytes, ctx.cfg.clone())
+                }
+                RoutingMode::PerPacket => {
+                    DctcpConn::new_dynamic(flow_id, src, dst, ctx.chunk_bytes, ctx.cfg.clone())
+                }
+            };
             if Some(flow_id) == probe_flow_id {
                 conn.enable_cwnd_log();
             }
@@ -289,6 +309,11 @@ fn main() {
         world.net.set_all_link_ecn_threshold_bytes(th_bytes);
     }
 
+    world.net.set_ecmp_hash_mode(match args.routing {
+        RoutingMode::PerFlow => EcmpHashMode::Flow,
+        RoutingMode::PerPacket => EcmpHashMode::Packet,
+    });
+
     if args.viz_json.is_some() {
         world.net.viz = Some(htsim_rs::viz::VizLogger::default());
         world.net.emit_viz_meta();
@@ -309,6 +334,7 @@ fn main() {
         hosts: topo.hosts.iter().take(ranks).copied().collect(),
         chunk_bytes,
         cfg,
+        routing: args.routing,
         step: 0,
         inflight: 0,
         next_flow_id: 1,
