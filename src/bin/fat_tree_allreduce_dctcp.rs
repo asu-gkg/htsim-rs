@@ -1,13 +1,13 @@
 //! Fat-tree ring allreduce with DCTCP flows.
 
 use clap::{Parser, ValueEnum};
-use htsim_rs::net::{EcmpHashMode, NetWorld};
-use htsim_rs::proto::dctcp::{DctcpConfig, DctcpConn, DctcpDoneCallback};
-use htsim_rs::sim::{Event, SimTime, Simulator, World};
+use htsim_rs::cc::ring::{self, RingAllreduceConfig, RingTransport, RoutingMode as CcRoutingMode};
+use htsim_rs::net::{EcmpHashMode, NetWorld, NodeId};
+use htsim_rs::proto::dctcp::DctcpConfig;
+use htsim_rs::sim::{SimTime, Simulator};
 use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Parser)]
 #[command(name = "fat-tree-allreduce-dctcp", about = "Fat-tree ring allreduce with DCTCP")]
@@ -96,156 +96,55 @@ enum RoutingMode {
     PerPacket,
 }
 
-#[derive(Clone)]
-struct CollectiveState {
-    ranks: usize,
-    hosts: Vec<htsim_rs::net::NodeId>,
-    chunk_bytes: u64,
+struct DctcpRingTransport {
     cfg: DctcpConfig,
-    routing: RoutingMode,
-    step: usize,
-    inflight: usize,
-    next_flow_id: u64,
-    start_at: Option<SimTime>,
-    reduce_done_at: Option<SimTime>,
-    done_at: Option<SimTime>,
-    probe: Option<(usize, usize)>,
-    probe_conn_id: Option<u64>,
+    probe_flow_id: Option<u64>,
 }
 
-impl CollectiveState {
-    fn total_steps(&self) -> usize {
-        self.ranks.saturating_sub(1) * 2
-    }
-}
-
-struct StartStep {
-    state: Arc<Mutex<CollectiveState>>,
-}
-
-struct FlowDone {
-    state: Arc<Mutex<CollectiveState>>,
-}
-
-struct StepContext {
-    step: usize,
-    ranks: usize,
-    hosts: Vec<htsim_rs::net::NodeId>,
-    chunk_bytes: u64,
-    cfg: DctcpConfig,
-    start_flow_id: u64,
-    routing: RoutingMode,
-    probe: Option<(usize, usize)>,
-}
-
-impl Event for StartStep {
-    fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
-        let StartStep { state } = *self;
-        let w = world
-            .as_any_mut()
-            .downcast_mut::<NetWorld>()
-            .expect("world must be NetWorld");
-
-        let ctx = {
-            let mut st = state.lock().expect("collective state lock");
-            let total_steps = st.total_steps();
-            if total_steps == 0 {
-                if st.start_at.is_none() {
-                    st.start_at = Some(sim.now());
-                }
-                st.done_at = Some(sim.now());
-                return;
+impl RingTransport for DctcpRingTransport {
+    fn start_flow(
+        &mut self,
+        flow_id: u64,
+        src: NodeId,
+        dst: NodeId,
+        chunk_bytes: u64,
+        routing: CcRoutingMode,
+        sim: &mut Simulator,
+        world: &mut NetWorld,
+        done: ring::RingDoneCallback,
+    ) {
+        let mut dctcp = std::mem::take(&mut world.net.dctcp);
+        let mut conn = match routing {
+            CcRoutingMode::PerFlow => {
+                let route = world.net.route_ecmp_path(src, dst, flow_id);
+                htsim_rs::proto::dctcp::DctcpConn::new(
+                    flow_id,
+                    src,
+                    dst,
+                    route,
+                    chunk_bytes,
+                    self.cfg.clone(),
+                )
             }
-            if st.step >= total_steps {
-                st.done_at = Some(sim.now());
-                return;
-            }
-            if st.start_at.is_none() {
-                st.start_at = Some(sim.now());
-            }
-            st.inflight = st.ranks;
-            let start_flow_id = st.next_flow_id;
-            st.next_flow_id = st.next_flow_id.saturating_add(st.ranks as u64);
-            StepContext {
-                step: st.step,
-                ranks: st.ranks,
-                hosts: st.hosts.clone(),
-                chunk_bytes: st.chunk_bytes,
-                cfg: st.cfg.clone(),
-                start_flow_id,
-                routing: st.routing,
-                probe: st.probe,
+            CcRoutingMode::PerPacket => {
+                htsim_rs::proto::dctcp::DctcpConn::new_dynamic(
+                    flow_id,
+                    src,
+                    dst,
+                    chunk_bytes,
+                    self.cfg.clone(),
+                )
             }
         };
-
-        let probe_flow_id = ctx.probe.and_then(|(rank, step)| {
-            if step == ctx.step && rank < ctx.ranks {
-                Some(ctx.start_flow_id + rank as u64)
-            } else {
-                None
-            }
+        if Some(flow_id) == self.probe_flow_id {
+            conn.enable_cwnd_log();
+        }
+        let done_cb: htsim_rs::proto::dctcp::DctcpDoneCallback = Box::new(move |_, now, sim| {
+            done(now, sim);
         });
-
-        let mut dctcp = std::mem::take(&mut w.net.dctcp);
-
-        for rank in 0..ctx.ranks {
-            let flow_id = ctx.start_flow_id + rank as u64;
-            let src = ctx.hosts[rank];
-            let dst = ctx.hosts[(rank + 1) % ctx.ranks];
-            let mut conn = match ctx.routing {
-                RoutingMode::PerFlow => {
-                    let route = w.net.route_ecmp_path(src, dst, flow_id);
-                    DctcpConn::new(flow_id, src, dst, route, ctx.chunk_bytes, ctx.cfg.clone())
-                }
-                RoutingMode::PerPacket => {
-                    DctcpConn::new_dynamic(flow_id, src, dst, ctx.chunk_bytes, ctx.cfg.clone())
-                }
-            };
-            if Some(flow_id) == probe_flow_id {
-                conn.enable_cwnd_log();
-            }
-            let done_state = Arc::clone(&state);
-            let done_cb: DctcpDoneCallback = Box::new(move |_, now, sim| {
-                sim.schedule(now, FlowDone { state: Arc::clone(&done_state) });
-            });
-            dctcp.set_done_callback(flow_id, done_cb);
-            dctcp.start_conn(conn, sim, &mut w.net);
-        }
-        w.net.dctcp = dctcp;
-
-        if let Some(fid) = probe_flow_id {
-            let mut st = state.lock().expect("collective state lock");
-            st.probe_conn_id = Some(fid);
-        }
-    }
-}
-
-impl Event for FlowDone {
-    fn execute(self: Box<Self>, sim: &mut Simulator, _world: &mut dyn World) {
-        let FlowDone { state } = *self;
-        let mut start_next = false;
-        {
-            let mut st = state.lock().expect("collective state lock");
-            if st.inflight == 0 || st.done_at.is_some() {
-                return;
-            }
-            st.inflight = st.inflight.saturating_sub(1);
-            if st.inflight == 0 {
-                if st.step + 1 == st.ranks.saturating_sub(1) {
-                    st.reduce_done_at = Some(sim.now());
-                }
-                st.step = st.step.saturating_add(1);
-                if st.step >= st.total_steps() {
-                    st.done_at = Some(sim.now());
-                } else {
-                    start_next = true;
-                }
-            }
-        }
-
-        if start_next {
-            sim.schedule(sim.now(), StartStep { state });
-        }
+        dctcp.set_done_callback(flow_id, done_cb);
+        dctcp.start_conn(conn, sim, &mut world.net);
+        world.net.dctcp = dctcp;
     }
 }
 
@@ -290,7 +189,7 @@ fn main() {
     }
 
     let total_steps = ranks.saturating_sub(1) * 2;
-    if let Some(_) = args.cwnd_csv {
+    if args.cwnd_csv.is_some() {
         if args.probe_rank >= ranks || args.probe_step >= total_steps {
             eprintln!(
                 "probe out of range: rank={} step={} (ranks={}, steps={})",
@@ -329,31 +228,39 @@ fn main() {
         g: args.dctcp_g,
     };
 
-    let state = Arc::new(Mutex::new(CollectiveState {
-        ranks,
-        hosts: topo.hosts.iter().take(ranks).copied().collect(),
-        chunk_bytes,
-        cfg,
-        routing: args.routing,
-        step: 0,
-        inflight: 0,
-        next_flow_id: 1,
-        start_at: None,
-        reduce_done_at: None,
-        done_at: None,
-        probe: args.cwnd_csv.as_ref().map(|_| (args.probe_rank, args.probe_step)),
-        probe_conn_id: None,
-    }));
+    let probe_flow_id = args.cwnd_csv.as_ref().map(|_| {
+        let step_offset = (args.probe_step as u64).saturating_mul(ranks as u64);
+        1_u64
+            .saturating_add(step_offset)
+            .saturating_add(args.probe_rank as u64)
+    });
 
-    sim.schedule(SimTime::ZERO, StartStep { state: Arc::clone(&state) });
+    let transport = DctcpRingTransport {
+        cfg: cfg.clone(),
+        probe_flow_id,
+    };
+    let handle = ring::start_ring_allreduce(
+        &mut sim,
+        RingAllreduceConfig {
+            ranks,
+            hosts: topo.hosts.iter().take(ranks).copied().collect(),
+            chunk_bytes,
+            routing: match args.routing {
+                RoutingMode::PerFlow => CcRoutingMode::PerFlow,
+                RoutingMode::PerPacket => CcRoutingMode::PerPacket,
+            },
+            start_flow_id: 1,
+            transport: Box::new(transport),
+        },
+    );
     sim.run(&mut world);
 
-    let st = state.lock().expect("collective state lock");
-    let start = st.start_at.unwrap_or(sim.now());
-    let fct_ns = st
+    let stats = handle.stats();
+    let start = stats.start_at.unwrap_or(sim.now());
+    let fct_ns = stats
         .done_at
         .map(|d| d.0.saturating_sub(start.0));
-    let reduce_ns = st
+    let reduce_ns = stats
         .reduce_done_at
         .map(|d| d.0.saturating_sub(start.0));
 
@@ -364,7 +271,7 @@ fn main() {
             ranks,
             args.msg_bytes,
             chunk_bytes,
-            total_steps,
+            stats.total_steps,
             fct_ns.map(|ns| ns as f64 / 1_000_000.0),
             reduce_ns.map(|ns| ns as f64 / 1_000_000.0),
             world.net.stats.delivered_pkts,
@@ -385,7 +292,7 @@ fn main() {
     }
 
     if let Some(path) = args.cwnd_csv {
-        if let Some(conn_id) = st.probe_conn_id {
+        if let Some(conn_id) = probe_flow_id {
             if let Some(c) = world.net.dctcp.get(conn_id) {
                 if let Some(samples) = c.cwnd_samples() {
                     let mut out = String::from("t_ns,cwnd_bytes,ssthresh_bytes,alpha,acked_bytes\n");

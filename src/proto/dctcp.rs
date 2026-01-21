@@ -11,8 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use crate::net::{Ecn, NetWorld, Network, NodeId};
-use crate::proto::{DctcpSegment, Transport};
+use crate::net::{with_dctcp_stack, DctcpSegment, Ecn, NetApi, NodeId, Transport};
 use crate::sim::{Event, SimTime, Simulator, World};
 
 /// 一个 DCTCP 连接的唯一标识（复用 `flow_id` 的语义）。
@@ -212,14 +211,14 @@ impl DctcpConn {
         self.inflight.values().map(|s| s.len as u64).sum()
     }
 
-    fn make_data_packet(&self, net: &mut Network) -> crate::net::Packet {
+    fn make_data_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
             DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone()),
             DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst),
         }
     }
 
-    fn make_ack_packet(&self, net: &mut Network) -> crate::net::Packet {
+    fn make_ack_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
             DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone()),
             DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src),
@@ -275,7 +274,7 @@ impl DctcpStack {
     }
 
     /// Insert a connection, record initial cwnd sample, and start sending.
-    pub fn start_conn(&mut self, conn: DctcpConn, sim: &mut Simulator, net: &mut Network) {
+    pub fn start_conn(&mut self, conn: DctcpConn, sim: &mut Simulator, net: &mut dyn NetApi) {
         let id = conn.id;
         self.insert(conn);
         if let Some(c) = self.get_mut(id) {
@@ -305,7 +304,7 @@ impl DctcpStack {
         &mut self,
         id: DctcpConnId,
         sim: &mut Simulator,
-        net: &mut Network,
+        net: &mut dyn NetApi,
     ) {
         let Some(conn) = self.conns.get_mut(&id) else {
             return;
@@ -340,7 +339,7 @@ impl DctcpStack {
             pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len });
             pkt.ecn = Ecn::Ect0;
 
-            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len);
+            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len, false);
 
             conn.inflight.insert(seq, SentSeg { len });
 
@@ -364,7 +363,7 @@ impl DctcpStack {
         ack: u64,
         ecn_echo: bool,
         sim: &mut Simulator,
-        net: &mut Network,
+        net: &mut dyn NetApi,
     ) {
         let Some(conn) = self.conns.get(&id) else {
             return;
@@ -373,7 +372,7 @@ impl DctcpStack {
         pkt.size_bytes = conn.cfg.ack_bytes;
         pkt.transport = Transport::Dctcp(DctcpSegment::Ack { ack, ecn_echo });
 
-        net.viz_tcp_send_ack(sim.now().0, conn.id, ack);
+        net.viz_tcp_send_ack(sim.now().0, conn.id, ack, ecn_echo);
         net.forward_from(conn.dst, pkt, sim);
     }
 
@@ -384,7 +383,7 @@ impl DctcpStack {
         seg: DctcpSegment,
         ecn: Ecn,
         sim: &mut Simulator,
-        net: &mut Network,
+        net: &mut dyn NetApi,
     ) {
         match seg {
             DctcpSegment::Data { seq, len } => {
@@ -411,7 +410,7 @@ impl DctcpStack {
                     return;
                 }
 
-                net.viz_tcp_recv_ack(sim.now().0, conn.id, ack);
+                net.viz_tcp_recv_ack(sim.now().0, conn.id, ack, ecn_echo);
 
                 if ack > conn.last_acked {
                     conn.dup_acks = 0;
@@ -539,28 +538,23 @@ pub struct DctcpStart {
 impl Event for DctcpStart {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
         let DctcpStart { conn } = *self;
-        let w = world
-            .as_any_mut()
-            .downcast_mut::<NetWorld>()
-            .expect("world must be NetWorld");
-
         let id = conn.id;
-        let mut dctcp = std::mem::take(&mut w.net.dctcp);
-        dctcp.insert(conn);
-        if let Some(c) = dctcp.get_mut(id) {
-            let now = sim.now();
-            c.record_cwnd(now);
-            w.net.viz_dctcp_cwnd(
-                now.0,
-                c.id,
-                c.cwnd_bytes,
-                c.ssthresh_bytes,
-                c.inflight_bytes(),
-                c.alpha,
-            );
-        }
-        dctcp.send_data_if_possible(id, sim, &mut w.net);
-        w.net.dctcp = dctcp;
+        with_dctcp_stack(world, move |net, dctcp| {
+            dctcp.insert(conn);
+            if let Some(c) = dctcp.get_mut(id) {
+                let now = sim.now();
+                c.record_cwnd(now);
+                net.viz_dctcp_cwnd(
+                    now.0,
+                    c.id,
+                    c.cwnd_bytes,
+                    c.ssthresh_bytes,
+                    c.inflight_bytes(),
+                    c.alpha,
+                );
+            }
+            dctcp.send_data_if_possible(id, sim, net);
+        });
     }
 }
 
@@ -574,59 +568,49 @@ pub struct DctcpRto {
 impl Event for DctcpRto {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
         let DctcpRto { conn_id, seq } = *self;
-        let w = world
-            .as_any_mut()
-            .downcast_mut::<NetWorld>()
-            .expect("world must be NetWorld");
+        with_dctcp_stack(world, |net, dctcp| {
+            net.viz_tcp_rto(sim.now().0, conn_id, seq);
 
-        w.net.viz_tcp_rto(sim.now().0, conn_id, seq);
+            let Some(conn) = dctcp.get_mut(conn_id) else {
+                return;
+            };
+            if conn.done_at.is_some() {
+                return;
+            }
 
-        let mut dctcp = std::mem::take(&mut w.net.dctcp);
-        let Some(conn) = dctcp.get_mut(conn_id) else {
-            w.net.dctcp = dctcp;
-            return;
-        };
-        if conn.done_at.is_some() {
-            w.net.dctcp = dctcp;
-            return;
-        }
+            if conn.earliest_unacked_seq() != Some(seq) {
+                return;
+            }
+            let Some(sent) = conn.inflight.get(&seq).cloned() else {
+                return;
+            };
 
-        if conn.earliest_unacked_seq() != Some(seq) {
-            w.net.dctcp = dctcp;
-            return;
-        }
-        let Some(sent) = conn.inflight.get(&seq).cloned() else {
-            w.net.dctcp = dctcp;
-            return;
-        };
+            let mss = conn.cfg.mss as u64;
+            conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
+            conn.cwnd_bytes = mss;
+            conn.dup_acks = 0;
+            conn.rto = SimTime((conn.rto.0.saturating_mul(2)).min(conn.cfg.max_rto.0));
+            let now = sim.now();
+            conn.record_cwnd(now);
+            net.viz_dctcp_cwnd(
+                now.0,
+                conn.id,
+                conn.cwnd_bytes,
+                conn.ssthresh_bytes,
+                conn.inflight_bytes(),
+                conn.alpha,
+            );
 
-        let mss = conn.cfg.mss as u64;
-        conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
-        conn.cwnd_bytes = mss;
-        conn.dup_acks = 0;
-        conn.rto = SimTime((conn.rto.0.saturating_mul(2)).min(conn.cfg.max_rto.0));
-        let now = sim.now();
-        conn.record_cwnd(now);
-        w.net.viz_dctcp_cwnd(
-            now.0,
-            conn.id,
-            conn.cwnd_bytes,
-            conn.ssthresh_bytes,
-            conn.inflight_bytes(),
-            conn.alpha,
-        );
+            let mut pkt = conn.make_data_packet(net);
+            pkt.size_bytes = conn.cfg.mss;
+            pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len: sent.len });
+            pkt.ecn = Ecn::Ect0;
+            net.forward_from(conn.src, pkt, sim);
 
-        let mut pkt = conn.make_data_packet(&mut w.net);
-        pkt.size_bytes = conn.cfg.mss;
-        pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len: sent.len });
-        pkt.ecn = Ecn::Ect0;
-        w.net.forward_from(conn.src, pkt, sim);
-
-        sim.schedule(
-            SimTime(sim.now().0.saturating_add(conn.rto.0)),
-            DctcpRto { conn_id, seq },
-        );
-
-        w.net.dctcp = dctcp;
+            sim.schedule(
+                SimTime(sim.now().0.saturating_add(conn.rto.0)),
+                DctcpRto { conn_id, seq },
+            );
+        });
     }
 }

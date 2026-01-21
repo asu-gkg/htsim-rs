@@ -103,6 +103,11 @@ pub struct VizTcp {
     pub seq: Option<u64>,
     pub len: Option<u32>,
     pub ack: Option<u64>,
+    /// 是否为重传（RTO/快速重传触发的 resend）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrans: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecn_echo: Option<bool>,
 }
 
 /// 一个可回放的事件（JSON）

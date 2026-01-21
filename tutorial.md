@@ -27,7 +27,7 @@ cargo run --bin trace_single_packet
 cargo run --bin dumbbell_tcp -- --viz-json out.json
 
 # DCTCP dumbbell
-cargo run --bin dumbbell_dctcp -- --ecn-k-pkts 20
+cargo run --bin dumbbell_dctcp -- --ecn-k-pkts 20  --viz-json out.json
 
 # fat-tree demo
 cargo run --bin fat_tree

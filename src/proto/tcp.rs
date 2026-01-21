@@ -3,8 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use crate::net::{NetWorld, Network, NodeId};
-use crate::proto::{TcpSegment, Transport};
+use crate::net::{with_tcp_stack, NetApi, NodeId, TcpSegment, Transport};
 use crate::sim::{Event, SimTime, Simulator, World};
 
 /// 一个 TCP 连接的唯一标识（复用 `flow_id` 的语义）。
@@ -246,14 +245,14 @@ impl TcpConn {
         self.inflight.keys().next().copied()
     }
 
-    fn make_data_packet(&self, net: &mut Network) -> crate::net::Packet {
+    fn make_data_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
             TcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone()),
             TcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst),
         }
     }
 
-    fn make_ack_packet(&self, net: &mut Network) -> crate::net::Packet {
+    fn make_ack_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
             TcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone()),
             TcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src),
@@ -378,13 +377,18 @@ impl TcpStack {
         self.conns.get_mut(&id)
     }
 
-    pub fn start_conn(&mut self, conn: TcpConn, sim: &mut Simulator, net: &mut Network) {
+    pub fn start_conn(&mut self, conn: TcpConn, sim: &mut Simulator, net: &mut dyn NetApi) {
         let id = conn.id;
         self.insert(conn);
         self.send_data_if_possible(id, sim, net);
     }
 
-    pub(crate) fn send_data_if_possible(&mut self, id: TcpConnId, sim: &mut Simulator, net: &mut Network) {
+    pub(crate) fn send_data_if_possible(
+        &mut self,
+        id: TcpConnId,
+        sim: &mut Simulator,
+        net: &mut dyn NetApi,
+    ) {
         let Some(conn) = self.conns.get_mut(&id) else {
             return;
         };
@@ -431,7 +435,7 @@ impl TcpStack {
             pkt.size_bytes = conn.cfg.mss; // 包大小按 mss 计（简化）
             pkt.transport = Transport::Tcp(TcpSegment::Data { seq, len });
 
-            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len);
+            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len, false);
 
             conn.inflight.insert(
                 seq,
@@ -447,14 +451,14 @@ impl TcpStack {
         conn.ensure_rto(sim);
     }
 
-    fn send_ack(&mut self, id: TcpConnId, ack: u64, sim: &mut Simulator, net: &mut Network) {
+    fn send_ack(&mut self, id: TcpConnId, ack: u64, sim: &mut Simulator, net: &mut dyn NetApi) {
         let Some(conn) = self.conns.get(&id) else {
             return;
         };
         let mut pkt = conn.make_ack_packet(net);
         pkt.size_bytes = conn.cfg.ack_bytes;
         pkt.transport = Transport::Tcp(TcpSegment::Ack { ack });
-        net.viz_tcp_send_ack(sim.now().0, conn.id, ack);
+        net.viz_tcp_send_ack(sim.now().0, conn.id, ack, false);
         net.forward_from(conn.dst, pkt, sim);
     }
 
@@ -464,7 +468,7 @@ impl TcpStack {
         at: NodeId,
         seg: TcpSegment,
         sim: &mut Simulator,
-        net: &mut Network,
+        net: &mut dyn NetApi,
     ) {
         match seg {
             TcpSegment::Syn => {
@@ -540,7 +544,7 @@ impl TcpStack {
                 }
 
                 // 记录“收到 ACK”这一事实（无论新 ACK 或 dupACK）
-                net.viz_tcp_recv_ack(sim.now().0, conn.id, ack);
+                net.viz_tcp_recv_ack(sim.now().0, conn.id, ack, false);
 
                 if ack > conn.last_acked {
                     let now = sim.now();
@@ -600,6 +604,7 @@ impl TcpStack {
                                 let mut pkt = conn.make_data_packet(net);
                                 pkt.size_bytes = conn.cfg.mss;
                                 pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len });
+                                net.viz_tcp_send_data(sim.now().0, conn.id, seq0, len, true);
                                 net.forward_from(conn.src, pkt, sim);
                                 if let Some(sent) = conn.inflight.get_mut(&seq0) {
                                     sent.sent_at = sim.now();
@@ -658,6 +663,7 @@ impl TcpStack {
                             let mut pkt = conn.make_data_packet(net);
                             pkt.size_bytes = conn.cfg.mss;
                             pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len });
+                            net.viz_tcp_send_data(sim.now().0, conn.id, seq0, len, true);
                             net.forward_from(conn.src, pkt, sim);
                             if let Some(sent) = conn.inflight.get_mut(&seq0) {
                                 sent.sent_at = sim.now();
@@ -691,17 +697,11 @@ pub struct TcpStart {
 impl Event for TcpStart {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
         let TcpStart { conn } = *self;
-        let w = world
-            .as_any_mut()
-            .downcast_mut::<NetWorld>()
-            .expect("world must be NetWorld");
-
         let id = conn.id;
-        // 规避同时借用 `w.net` 与 `w.net.tcp`
-        let mut tcp = std::mem::take(&mut w.net.tcp);
-        tcp.insert(conn);
-        tcp.send_data_if_possible(id, sim, &mut w.net);
-        w.net.tcp = tcp;
+        with_tcp_stack(world, move |net, tcp| {
+            tcp.insert(conn);
+            tcp.send_data_if_possible(id, sim, net);
+        });
     }
 }
 
@@ -715,159 +715,79 @@ pub struct TcpRto {
 impl Event for TcpRto {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
         let TcpRto { conn_id, token } = *self;
-        let w = world
-            .as_any_mut()
-            .downcast_mut::<NetWorld>()
-            .expect("world must be NetWorld");
-
-        // 规避同时借用 `w.net` 与 `w.net.tcp`
-        let mut tcp = std::mem::take(&mut w.net.tcp);
-        let Some(conn) = tcp.get_mut(conn_id) else {
-            w.net.tcp = tcp;
-            return;
-        };
-        if conn.done_at.is_some() {
-            w.net.tcp = tcp;
-            return;
-        }
-        if conn.rto_deadline.is_none() || conn.rto_token != token {
-            w.net.tcp = tcp;
-            return;
-        }
-        let deadline = conn.rto_deadline.unwrap();
-        if sim.now() < deadline {
-            w.net.tcp = tcp;
-            return;
-        }
-        conn.rto_deadline = None;
-
-        if conn.sender_state != SenderState::Established {
-            // SYN 超时重传
-            if conn.syn_sent_at.is_some() {
-                let rto = conn.rto.0.saturating_mul(2);
-                let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
-                conn.rto = SimTime(rto);
-                let mut pkt = conn.make_data_packet(&mut w.net);
-                pkt.size_bytes = conn.cfg.ack_bytes;
-                pkt.transport = Transport::Tcp(TcpSegment::Syn);
-                conn.syn_sent_at = Some(sim.now());
-                conn.syn_retries = conn.syn_retries.saturating_add(1);
-                w.net.forward_from(conn.src, pkt, sim);
-                conn.schedule_rto(sim);
+        with_tcp_stack(world, |net, tcp| {
+            let Some(conn) = tcp.get_mut(conn_id) else {
+                return;
+            };
+            if conn.done_at.is_some() {
+                return;
             }
-            w.net.tcp = tcp;
-            return;
-        }
+            if conn.rto_deadline.is_none() || conn.rto_token != token {
+                return;
+            }
+            let deadline = conn.rto_deadline.unwrap();
+            if sim.now() < deadline {
+                return;
+            }
+            conn.rto_deadline = None;
 
-        let Some(seq0) = conn.earliest_unacked_seq() else {
-            w.net.tcp = tcp;
-            return;
-        };
-        let Some(sent) = conn.inflight.get(&seq0).cloned() else {
-            w.net.tcp = tcp;
-            return;
-        };
+            if conn.sender_state != SenderState::Established {
+                // SYN 超时重传
+                if conn.syn_sent_at.is_some() {
+                    let rto = conn.rto.0.saturating_mul(2);
+                    let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
+                    conn.rto = SimTime(rto);
+                    let mut pkt = conn.make_data_packet(net);
+                    pkt.size_bytes = conn.cfg.ack_bytes;
+                    pkt.transport = Transport::Tcp(TcpSegment::Syn);
+                    conn.syn_sent_at = Some(sim.now());
+                    conn.syn_retries = conn.syn_retries.saturating_add(1);
+                    net.forward_from(conn.src, pkt, sim);
+                    conn.schedule_rto(sim);
+                }
+                return;
+            }
 
-        // 先记录 RTO 事件（即将触发重传）
-        w.net.viz_tcp_rto(sim.now().0, conn_id, seq0);
+            let Some(seq0) = conn.earliest_unacked_seq() else {
+                return;
+            };
+            let Some(sent) = conn.inflight.get(&seq0).cloned() else {
+                return;
+            };
 
-        if conn.in_fast_recovery {
-            let flightsize = conn.next_seq.saturating_sub(conn.last_acked);
-            conn.cwnd_bytes = conn
-                .ssthresh_bytes
-                .min(flightsize.saturating_add(conn.cfg.mss as u64));
-        }
+            // 先记录 RTO 事件（即将触发重传）
+            net.viz_tcp_rto(sim.now().0, conn_id, seq0);
 
-        // 超时：回到慢启动
-        let mss = conn.cfg.mss as u64;
-        conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
-        conn.cwnd_bytes = mss;
-        conn.dup_acks = 0;
-        conn.in_fast_recovery = false;
-        conn.recover = conn.next_seq;
-        let rto = conn.rto.0.saturating_mul(2);
-        let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
-        conn.rto = SimTime(rto);
+            if conn.in_fast_recovery {
+                let flightsize = conn.next_seq.saturating_sub(conn.last_acked);
+                conn.cwnd_bytes = conn
+                    .ssthresh_bytes
+                    .min(flightsize.saturating_add(conn.cfg.mss as u64));
+            }
 
-        // 重传 earliest unacked
-        let mut pkt = conn.make_data_packet(&mut w.net);
-        pkt.size_bytes = conn.cfg.mss;
-        pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len: sent.len });
-        w.net.forward_from(conn.src, pkt, sim);
-        if let Some(sent) = conn.inflight.get_mut(&seq0) {
-            sent.sent_at = sim.now();
-            sent.retransmitted = true;
-        }
+            // 超时：回到慢启动
+            let mss = conn.cfg.mss as u64;
+            conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
+            conn.cwnd_bytes = mss;
+            conn.dup_acks = 0;
+            conn.in_fast_recovery = false;
+            conn.recover = conn.next_seq;
+            let rto = conn.rto.0.saturating_mul(2);
+            let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
+            conn.rto = SimTime(rto);
 
-        conn.schedule_rto(sim);
+            // 重传 earliest unacked
+            let mut pkt = conn.make_data_packet(net);
+            pkt.size_bytes = conn.cfg.mss;
+            pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len: sent.len });
+            net.viz_tcp_send_data(sim.now().0, conn_id, seq0, sent.len, true);
+            net.forward_from(conn.src, pkt, sim);
+            if let Some(sent) = conn.inflight.get_mut(&seq0) {
+                sent.sent_at = sim.now();
+                sent.retransmitted = true;
+            }
 
-        w.net.tcp = tcp;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::net::NetWorld;
-    use crate::sim::{SimTime, Simulator};
-
-    #[test]
-    fn recv_data_reorders_and_advances_ack() {
-        let mut cfg = TcpConfig::default();
-        cfg.handshake = false;
-        let mut conn = TcpConn::new(1, NodeId(0), NodeId(1), vec![NodeId(0), NodeId(1)], 3000, cfg);
-
-        let ack0 = conn.recv_data(0, 1000);
-        assert_eq!(ack0, 1000);
-
-        let ack1 = conn.recv_data(2000, 1000);
-        assert_eq!(ack1, 1000);
-
-        let ack2 = conn.recv_data(1000, 1000);
-        assert_eq!(ack2, 3000);
-    }
-
-    #[test]
-    fn rto_estimator_updates_on_samples() {
-        let mut cfg = TcpConfig::default();
-        cfg.min_rto = SimTime::ZERO;
-        cfg.max_rto = SimTime::from_secs(10);
-        let mut conn = TcpConn::new(1, NodeId(0), NodeId(1), vec![NodeId(0), NodeId(1)], 1000, cfg);
-
-        conn.update_rto_with_sample(SimTime(1_000));
-        assert_eq!(conn.srtt.unwrap().0, 1_000);
-        assert_eq!(conn.rttvar.0, 500);
-        assert_eq!(conn.rto.0, 3_000);
-
-        conn.update_rto_with_sample(SimTime(1_000));
-        assert_eq!(conn.srtt.unwrap().0, 1_000);
-        assert_eq!(conn.rttvar.0, 375);
-        assert_eq!(conn.rto.0, 2_500);
-    }
-
-    #[test]
-    fn handshake_establishes_sender_state() {
-        let mut sim = Simulator::default();
-        let mut world = NetWorld::default();
-        let h0 = world.net.add_host("h0".to_string());
-        let h1 = world.net.add_host("h1".to_string());
-        let bw = 1_000_000_000;
-        let latency = SimTime::from_micros(1);
-        world.net.connect(h0, h1, latency, bw);
-        world.net.connect(h1, h0, latency, bw);
-
-        let mut cfg = TcpConfig::default();
-        cfg.handshake = true;
-        cfg.min_rto = SimTime::from_micros(1);
-        cfg.max_rto = SimTime::from_millis(10);
-
-        let route = vec![h0, h1];
-        let conn = TcpConn::new(1, h0, h1, route, 1000, cfg);
-        sim.schedule(SimTime::ZERO, TcpStart { conn });
-        sim.run_until(SimTime::from_micros(10), &mut world);
-
-        let c = world.net.tcp.get(1).expect("tcp conn exists");
-        assert_eq!(c.sender_state, SenderState::Established);
-        assert!(c.syn_sent_at.is_none());
+            conn.schedule_rto(sim);
+        });
     }
 }

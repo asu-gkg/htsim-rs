@@ -1,0 +1,362 @@
+:root {
+    --bg: #f6f3ee;
+    --bg-2: #e7f0f6;
+    --panel: #ffffff;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: rgba(15, 23, 42, 0.12);
+    --accent: #0f766e;
+    --accent-2: #c2410c;
+    --ok: #16a34a;
+    --warn: #e11d48;
+    --shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
+    --sidebar-w: clamp(300px, 26vw, 420px);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: "Space Grotesk", "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    color: var(--ink);
+    background:
+        radial-gradient(1200px 600px at 10% 10%, #ffffff, transparent 60%),
+        radial-gradient(900px 400px at 90% 0%, #e7f0f6, transparent 55%),
+        linear-gradient(180deg, var(--bg), var(--bg-2));
+    min-height: 100vh;
+}
+
+.app {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    gap: 20px;
+    padding: 16px;
+    min-height: 100vh;
+}
+
+aside {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    padding: 18px 18px 16px;
+    box-shadow: var(--shadow);
+    position: sticky;
+    top: 18px;
+    align-self: start;
+    animation: rise 0.5s ease both;
+    min-width: 0;
+    max-height: calc(100vh - 36px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+
+main {
+    display: grid;
+    gap: 18px;
+    animation: rise 0.6s ease both;
+    min-width: 0;
+    grid-template-areas:
+        "topology"
+        "tcp"
+        "detail";
+    align-content: start;
+}
+
+.card-topology {
+    grid-area: topology;
+}
+
+.card-tcp {
+    grid-area: tcp;
+}
+
+.card-tcp-detail {
+    grid-area: detail;
+}
+
+h1 {
+    font-size: 20px;
+    margin: 0 0 14px;
+    letter-spacing: 0.2px;
+}
+
+h2 {
+    font-size: 13px;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--muted);
+}
+
+.section {
+    border-top: 1px dashed var(--line);
+    padding-top: 12px;
+    margin-top: 12px;
+}
+
+.grid {
+    display: grid;
+    gap: 10px;
+}
+
+label {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+input[type="file"],
+input[type="text"],
+select,
+button {
+    width: 100%;
+    border-radius: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    background: #f8fafc;
+    color: var(--ink);
+    font-size: 14px;
+}
+
+input[type="text"] {
+    font-family: "JetBrains Mono", monospace;
+}
+
+button {
+    cursor: pointer;
+    font-weight: 600;
+    background: rgba(15, 118, 110, 0.12);
+    border-color: rgba(15, 118, 110, 0.35);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+button.secondary {
+    background: #f1f5f9;
+    border-color: var(--line);
+    font-weight: 500;
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+button:not(:disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18);
+}
+
+.btns {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+.row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.small {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.status-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 16px;
+}
+
+.kbd {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: #0f172a;
+    color: #e2e8f0;
+}
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.chip {
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    padding: 4px 10px;
+    background: #f8fafc;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.log {
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 14px;
+    padding: 12px;
+    height: 36vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+}
+
+.canvas-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    padding: 16px 16px 14px;
+    box-shadow: var(--shadow);
+}
+
+.canvas-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.canvas-title {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.canvas-meta {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+canvas {
+    width: 100%;
+    height: clamp(260px, 32vh, 420px);
+    border-radius: 18px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), rgba(15, 23, 42, 0.06));
+    display: block;
+}
+
+canvas.tcp {
+    height: clamp(200px, 24vh, 300px);
+}
+
+canvas.topology {
+    height: clamp(240px, 30vh, 360px);
+}
+
+canvas.tcp-detail {
+    height: clamp(240px, 30vh, 380px);
+}
+
+.card-topology {
+    padding: 10px 12px 8px;
+}
+
+.card-topology .canvas-header {
+    margin-bottom: 6px;
+}
+
+.card-topology .legend {
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+.legend {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.timeline {
+    display: grid;
+    gap: 6px;
+}
+
+input[type="range"] {
+    width: 100%;
+}
+
+@keyframes rise {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media (min-width: 1500px) {
+    main {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-areas:
+            "topology topology"
+            "tcp detail";
+    }
+}
+
+@media (max-width: 1100px) {
+    .app {
+        grid-template-columns: 1fr;
+        padding: 16px;
+    }
+    aside {
+        position: static;
+        max-height: none;
+        overflow: visible;
+    }
+    .row {
+        grid-template-columns: 1fr;
+    }
+    main {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "topology"
+            "tcp"
+            "detail";
+    }
+    canvas {
+        height: 280px;
+    }
+    canvas.tcp {
+        height: 200px;
+    }
+    canvas.topology {
+        height: 200px;
+    }
+    canvas.tcp-detail {
+        height: 240px;
+    }
+}
+
+@media (max-width: 720px) {
+    .app {
+        padding: 12px;
+        gap: 16px;
+    }
+    .log {
+        height: 24vh;
+    }
+    canvas {
+        height: 240px;
+    }
+    canvas.tcp {
+        height: 180px;
+    }
+    canvas.topology {
+        height: 180px;
+    }
+    canvas.tcp-detail {
+        height: 220px;
+    }
+}

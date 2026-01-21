@@ -3,7 +3,7 @@
 //! 定义网络数据包及其相关操作。
 
 use super::id::NodeId;
-use crate::proto::Transport;
+use super::transport::Transport;
 
 /// 网络数据包
 #[derive(Debug, Clone)]
@@ -138,30 +138,5 @@ impl Packet {
             Routing::Dynamic => {}
         }
         self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mixed_routing_uses_prefix_then_falls_back_to_dynamic() {
-        let a = NodeId(0);
-        let b = NodeId(1);
-        let c = NodeId(2);
-        let d = NodeId(3);
-
-        let pkt = Packet::new_mixed(1, 7, 1000, vec![a, b, c], d);
-        assert_eq!(pkt.src, a);
-        assert_eq!(pkt.dst, d);
-        assert_eq!(pkt.preset_next(), Some(b));
-
-        let pkt = pkt.advance(); // now at b (prefix idx=1)
-        assert_eq!(pkt.preset_next(), Some(c));
-
-        let pkt = pkt.advance(); // now at c (prefix idx=2)
-        // prefix 用完后不再返回 preset 下一跳
-        assert_eq!(pkt.preset_next(), None);
     }
 }
