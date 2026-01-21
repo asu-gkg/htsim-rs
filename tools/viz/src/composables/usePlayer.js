@@ -55,6 +55,7 @@ export function usePlayer() {
         tcpSeries: new Map(),
         curText: "（空）",
         statsText: "（空）",
+        maxLinkBandwidth: 0, // 用于判断瓶颈链路
     });
 
     const hasEvents = computed(() => state.events.length > 0);
@@ -144,18 +145,23 @@ export function usePlayer() {
         for (const n of state.nodes) {
             state.nodeStats.set(n.id, { rx: 0, forward: 0, delivered: 0, bytes: 0 });
         }
+        state.maxLinkBandwidth = 0;
         if (state.meta?.links) {
             for (const l of state.meta.links) {
+                const bw = l.bandwidth_bps ?? 0;
+                if (bw > state.maxLinkBandwidth) state.maxLinkBandwidth = bw;
                 state.linkStats.set(linkKey(l.from, l.to), {
                     from: l.from,
                     to: l.to,
                     q_bytes: 0,
                     q_peak: 0,
+                    q_pkts: 0,
+                    q_pkts_peak: 0,
                     q_cap: l.q_cap_bytes ?? null,
                     tx_pkts: 0,
                     drop_pkts: 0,
                     first_drop_t: null,
-                    bandwidth_bps: l.bandwidth_bps ?? null,
+                    bandwidth_bps: bw,
                     latency_ns: l.latency_ns ?? null,
                 });
             }
@@ -222,9 +228,10 @@ export function usePlayer() {
             );
             const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
             const ls =
-                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_pkts: 0, q_pkts_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
             const pb = ev.pkt_bytes != null ? Number(ev.pkt_bytes) : 0;
             ls.q_bytes = Math.max(0, Number(ls.q_bytes || 0) - pb);
+            ls.q_pkts = Math.max(0, Number(ls.q_pkts || 0) - 1); // 出队，包数 -1
             ls.tx_pkts = Number(ls.tx_pkts || 0) + 1;
             ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
             state.linkStats.set(lk, ls);
@@ -249,11 +256,12 @@ export function usePlayer() {
             );
             const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
             const ls =
-                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_pkts: 0, q_pkts_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
             ls.drop_pkts = Number(ls.drop_pkts || 0) + 1;
             if (ev.q_bytes != null) ls.q_bytes = Number(ev.q_bytes);
             if (ev.q_cap_bytes != null) ls.q_cap = Number(ev.q_cap_bytes);
             ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
+            // drop 时包没入队，不更新 q_pkts
             if (ls.first_drop_t == null) ls.first_drop_t = Number(ev.t_ns ?? 0);
             state.linkStats.set(lk, ls);
         } else if (kind === "node_rx") {
@@ -272,9 +280,11 @@ export function usePlayer() {
             state.lastEventsText.push(`${head} pkt=${ev.pkt_id} link=${ev.link_from}->${ev.link_to} q=${ev.q_bytes}/${ev.q_cap_bytes}`);
             const lk = linkKey(Number(ev.link_from), Number(ev.link_to));
             const ls =
-                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
+                state.linkStats.get(lk) || { q_bytes: 0, q_peak: 0, q_pkts: 0, q_pkts_peak: 0, q_cap: null, tx_pkts: 0, drop_pkts: 0, first_drop_t: null };
             if (ev.q_bytes != null) ls.q_bytes = Number(ev.q_bytes);
             if (ev.q_cap_bytes != null) ls.q_cap = Number(ev.q_cap_bytes);
+            ls.q_pkts = Number(ls.q_pkts || 0) + 1; // 入队，包数 +1
+            ls.q_pkts_peak = Math.max(Number(ls.q_pkts_peak || 0), ls.q_pkts);
             ls.q_peak = Math.max(Number(ls.q_peak || 0), Number(ls.q_bytes || 0));
             state.linkStats.set(lk, ls);
         } else if (kind.startsWith("tcp_")) {
@@ -341,41 +351,147 @@ export function usePlayer() {
         for (const l of state.drawLinks) drawLink(l);
         for (const n of state.nodes) drawNode(n);
         for (const p of state.inflight.values()) drawPacket(p);
-
+        // 不再绘制红色叉标记（因为链路标签已显示 drop 数量和颜色）
         state.dropMarks = state.dropMarks.filter((m) => m.until >= state.curTime);
-        const perLink = new Map();
-        for (const m of state.dropMarks) {
-            const k = linkKey(m.from, m.to);
-            if (!perLink.has(k)) perLink.set(k, []);
-            perLink.get(k).push(m);
-        }
-        for (const [k, arr] of perLink.entries()) {
-            arr.sort((a, b) => b.at - a.at);
-            for (let i = 0; i < arr.length; i++) {
-                drawDropMark(arr[i], i, i === 0);
-            }
-        }
     }
 
     function drawLink(l) {
         const a = state.nodeById.get(l.from);
         const b = state.nodeById.get(l.to);
         if (!a || !b) return;
+
+        // 获取两个方向的链路统计
+        const fwd = state.linkStats.get(linkKey(l.from, l.to));
+        const rev = state.linkStats.get(linkKey(l.to, l.from));
+
+        // 计算队列占用比例（取两个方向的最大值）
+        const fwdRatio = fwd && fwd.q_cap > 0 ? fwd.q_bytes / fwd.q_cap : 0;
+        const revRatio = rev && rev.q_cap > 0 ? rev.q_bytes / rev.q_cap : 0;
+        const maxRatio = Math.max(fwdRatio, revRatio);
+
+        // 判断是否为瓶颈链路（带宽低于最大带宽）
+        const fwdBw = fwd?.bandwidth_bps ?? 0;
+        const revBw = rev?.bandwidth_bps ?? 0;
+        const linkBw = Math.min(fwdBw || Infinity, revBw || Infinity);
+        const isBottleneck = linkBw < state.maxLinkBandwidth && linkBw > 0;
+
+        // 根据队列深度计算链路颜色（绿→黄→红）
+        const linkColor = queueRatioColor(maxRatio);
+        // 链路粗细随队列深度增加（4~10）
+        const baseWidth = 4 + Math.min(6, maxRatio * 8);
+
         netCtx.save();
-        netCtx.strokeStyle = "rgba(15,23,42,0.18)";
-        netCtx.lineWidth = 6;
+        // 底层阴影
+        netCtx.strokeStyle = "rgba(15,23,42,0.12)";
+        netCtx.lineWidth = baseWidth + 4;
         netCtx.lineCap = "round";
         netCtx.beginPath();
         netCtx.moveTo(a.x, a.y);
         netCtx.lineTo(b.x, b.y);
         netCtx.stroke();
 
-        netCtx.strokeStyle = "rgba(255,255,255,0.7)";
-        netCtx.lineWidth = 2;
+        // 瓶颈链路用虚线
+        if (isBottleneck) {
+            netCtx.setLineDash([8, 4]);
+        }
+
+        // 主链路（颜色随队列深度变化）
+        netCtx.strokeStyle = linkColor;
+        netCtx.lineWidth = baseWidth;
         netCtx.beginPath();
         netCtx.moveTo(a.x, a.y);
         netCtx.lineTo(b.x, b.y);
         netCtx.stroke();
+
+        // 高光
+        netCtx.setLineDash([]);
+        netCtx.strokeStyle = "rgba(255,255,255,0.35)";
+        netCtx.lineWidth = Math.max(1, baseWidth * 0.3);
+        netCtx.beginPath();
+        netCtx.moveTo(a.x, a.y);
+        netCtx.lineTo(b.x, b.y);
+        netCtx.stroke();
+        netCtx.restore();
+
+        // 绘制链路标签（队列深度 + 丢包数 + 瓶颈带宽）
+        drawLinkLabel(a, b, fwd, rev, isBottleneck, linkBw);
+    }
+
+    function queueRatioColor(ratio) {
+        // 0 = 绿色，0.5 = 黄色，1 = 红色
+        const r = ratio < 0.5 ? Math.round(255 * (ratio * 2)) : 255;
+        const g = ratio < 0.5 ? 200 : Math.round(200 * (1 - (ratio - 0.5) * 2));
+        const b = 80;
+        const alpha = 0.5 + ratio * 0.4; // 队列越满越不透明
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function drawLinkLabel(a, b, fwd, rev, isBottleneck, linkBw) {
+        // 计算链路中点和法向量（用于偏移标签位置）
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        const nx = -dy / len;
+        const ny = dx / len;
+
+        // 汇总两个方向的统计（包数）
+        const fwdPkts = fwd?.q_pkts ?? 0;
+        const revPkts = rev?.q_pkts ?? 0;
+        const fwdPeak = fwd?.q_pkts_peak ?? 0;
+        const revPeak = rev?.q_pkts_peak ?? 0;
+        const fwdDrop = fwd?.drop_pkts ?? 0;
+        const revDrop = rev?.drop_pkts ?? 0;
+        const totalPkts = fwdPkts + revPkts;
+        const totalPeak = fwdPeak + revPeak;
+        const totalDrop = fwdDrop + revDrop;
+
+        // 如果没有任何队列/丢包且没有带宽信息，不显示标签
+        if (totalPkts === 0 && totalPeak === 0 && totalDrop === 0 && linkBw <= 0) return;
+
+        const offsetY = 14;
+        const lx = mx + nx * offsetY;
+        const ly = my + ny * offsetY;
+
+        netCtx.save();
+        netCtx.font = "10px JetBrains Mono, monospace";
+        netCtx.textAlign = "center";
+        netCtx.textBaseline = "middle";
+
+        // 构建标签文本：带宽 | q:当前/峰值 | drop:丢包数
+        const parts = [];
+        // 所有链路都显示带宽
+        if (linkBw > 0) {
+            parts.push(`${fmtGbps(linkBw)}`);
+        }
+        if (totalPeak > 0) {
+            parts.push(`q:${totalPkts}/${totalPeak}`);
+        }
+        if (totalDrop > 0) {
+            parts.push(`drop:${totalDrop}`);
+        }
+        const text = parts.join(" ");
+        if (!text) {
+            netCtx.restore();
+            return;
+        }
+
+        // 绘制背景（瓶颈链路用橙色边框）
+        const tw = netCtx.measureText(text).width + 8;
+        const th = 14;
+        netCtx.fillStyle = "rgba(255,255,255,0.9)";
+        const borderColor = totalDrop > 0 ? "rgba(239,68,68,0.7)" : isBottleneck ? "rgba(245,158,11,0.7)" : "rgba(15,23,42,0.25)";
+        netCtx.strokeStyle = borderColor;
+        netCtx.lineWidth = 1;
+        netCtx.beginPath();
+        netCtx.roundRect(lx - tw / 2, ly - th / 2, tw, th, 4);
+        netCtx.fill();
+        netCtx.stroke();
+
+        // 绘制文本（有丢包时用红色，瓶颈用橙色）
+        netCtx.fillStyle = totalDrop > 0 ? "#dc2626" : isBottleneck ? "#d97706" : "#334155";
+        netCtx.fillText(text, lx, ly);
         netCtx.restore();
     }
 

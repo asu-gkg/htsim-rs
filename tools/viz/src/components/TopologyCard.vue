@@ -6,8 +6,9 @@
         </div>
         <canvas ref="canvas" class="topology" width="1100" height="220"></canvas>
         <div class="legend">
-            蓝色圆点=Data，绿色圆点=ACK，红色 X=Drop。链路上的圆点会按
-            <span class="kbd">tx_start.depart_ns → arrive_ns</span> 做线性动画。
+            <strong>数据包</strong>：蓝色=Data，绿色=ACK。
+            <strong>链路</strong>：虚线+橙色标签=瓶颈（低带宽）；颜色绿→黄→红=队列深度。
+            标签：<span class="kbd">带宽</span>、<span class="kbd">q:当前/峰值</span>、<span class="kbd">drop:N</span>。
         </div>
     </div>
 </template>
