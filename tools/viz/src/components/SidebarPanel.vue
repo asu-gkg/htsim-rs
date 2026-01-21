@@ -4,7 +4,27 @@
 
         <div class="grid">
             <label>1) 选择 JSON 事件文件</label>
-            <input type="file" accept=".json,application/json" @change="actions.onFile" />
+            <div
+                class="dropzone"
+                :class="{ 'dropzone-active': isDragging }"
+                @dragover.prevent="onDragOver"
+                @dragleave.prevent="onDragLeave"
+                @drop.prevent="onDrop"
+                @click="triggerFileInput"
+            >
+                <div class="dropzone-content">
+                    <span class="dropzone-icon">📁</span>
+                    <span v-if="isDragging">松开以上传文件</span>
+                    <span v-else>拖放 JSON 文件到这里<br />或点击选择</span>
+                </div>
+                <input
+                    ref="fileInput"
+                    type="file"
+                    accept=".json,application/json"
+                    @change="actions.onFile"
+                    style="display: none"
+                />
+            </div>
             <div class="small">
                 示例：<span class="kbd">cargo run --bin dumbbell_tcp -- --viz-json out.json</span>
             </div>
@@ -103,7 +123,7 @@
 </template>
 
 <script setup>
-import { inject } from "vue";
+import { inject, ref } from "vue";
 
 const player = inject("player");
 if (!player) {
@@ -113,4 +133,69 @@ if (!player) {
 const state = player.state;
 const { hasEvents, canPlay, metaNodesCount, metaLinksCount, layoutDetectedLabel, statusText } = player.computed;
 const actions = player.actions;
+
+const fileInput = ref(null);
+const isDragging = ref(false);
+
+function triggerFileInput() {
+    fileInput.value?.click();
+}
+
+function onDragOver() {
+    isDragging.value = true;
+}
+
+function onDragLeave() {
+    isDragging.value = false;
+}
+
+function onDrop(e) {
+    isDragging.value = false;
+    const files = e.dataTransfer?.files;
+    if (files?.length) {
+        // 创建一个模拟的 event 对象传给 onFile
+        actions.onFile({ target: { files } });
+    }
+}
 </script>
+
+<style scoped>
+.dropzone {
+    border: 2px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 20px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: #f8fafc;
+}
+
+.dropzone:hover {
+    border-color: #94a3b8;
+    background: #f1f5f9;
+}
+
+.dropzone-active {
+    border-color: #3b82f6;
+    background: #eff6ff;
+    border-style: solid;
+}
+
+.dropzone-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: #64748b;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.dropzone-icon {
+    font-size: 24px;
+}
+
+.dropzone-active .dropzone-content {
+    color: #3b82f6;
+}
+</style>

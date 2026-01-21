@@ -39,9 +39,9 @@ impl Default for TcpConfig {
             ack_bytes: 64,
             init_cwnd_bytes: (mss as u64).saturating_mul(10),
             init_ssthresh_bytes: (mss as u64).saturating_mul(1_000),
-            init_rto: SimTime::from_micros(200),
-            min_rto: SimTime::from_micros(200),
-            max_rto: SimTime::from_millis(200),
+            init_rto: SimTime::from_millis(200),  // 200ms，更接近真实 TCP
+            min_rto: SimTime::from_millis(1),     // 1ms 最小 RTO
+            max_rto: SimTime::from_millis(60000), // 60 秒最大 RTO
             handshake: false,
             app_limited_pps: None,
         }
@@ -623,6 +623,16 @@ impl TcpStack {
                         }
                     }
 
+                    // 记录 cwnd 状态变化
+                    net.viz_dctcp_cwnd(
+                        sim.now().0,
+                        conn.id,
+                        conn.cwnd_bytes,
+                        conn.ssthresh_bytes,
+                        conn.inflight_bytes(),
+                        0.0,
+                    );
+
                     // 移除已确认段
                     // 完成判定：所有数据都被累计确认
                     if conn.last_acked >= conn.total_bytes && conn.done_at.is_none() {
@@ -644,6 +654,15 @@ impl TcpStack {
                     // dupACK
                     if conn.in_fast_recovery {
                         conn.cwnd_bytes = conn.cwnd_bytes.saturating_add(conn.cfg.mss as u64);
+                        // 记录快速恢复中 dupACK 增加 cwnd 后的状态
+                        net.viz_dctcp_cwnd(
+                            sim.now().0,
+                            conn.id,
+                            conn.cwnd_bytes,
+                            conn.ssthresh_bytes,
+                            conn.inflight_bytes(),
+                            0.0,
+                        );
                         let id = conn.id;
                         let _ = conn;
                         self.send_data_if_possible(id, sim, net);
@@ -673,6 +692,15 @@ impl TcpStack {
                         conn.cwnd_bytes = conn.ssthresh_bytes.saturating_add(3 * mss);
                         conn.in_fast_recovery = true;
                         conn.recover = conn.next_seq;
+                        // 记录 3 dupACK 触发快速恢复时的 cwnd 状态
+                        net.viz_dctcp_cwnd(
+                            sim.now().0,
+                            conn.id,
+                            conn.cwnd_bytes,
+                            conn.ssthresh_bytes,
+                            conn.inflight_bytes(),
+                            0.0,
+                        );
                         let id = conn.id;
                         let _ = conn;
                         self.send_data_if_possible(id, sim, net);
@@ -698,8 +726,12 @@ impl Event for TcpStart {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn World) {
         let TcpStart { conn } = *self;
         let id = conn.id;
+        let init_cwnd = conn.cwnd_bytes;
+        let init_ssthresh = conn.ssthresh_bytes;
         with_tcp_stack(world, move |net, tcp| {
             tcp.insert(conn);
+            // 记录初始 cwnd/ssthresh 状态
+            net.viz_dctcp_cwnd(sim.now().0, id, init_cwnd, init_ssthresh, 0, 0.0);
             tcp.send_data_if_possible(id, sim, net);
         });
     }
@@ -775,6 +807,16 @@ impl Event for TcpRto {
             let rto = conn.rto.0.saturating_mul(2);
             let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
             conn.rto = SimTime(rto);
+
+            // 记录 RTO 触发后的 cwnd 状态
+            net.viz_dctcp_cwnd(
+                sim.now().0,
+                conn_id,
+                conn.cwnd_bytes,
+                conn.ssthresh_bytes,
+                conn.inflight_bytes(),
+                0.0,
+            );
 
             // 重传 earliest unacked
             let mut pkt = conn.make_data_packet(net);

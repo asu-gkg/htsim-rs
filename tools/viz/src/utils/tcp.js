@@ -68,88 +68,19 @@ export function buildTcpSeries(evts) {
 }
 
 function buildCwndSeries(arr, mss) {
+    // 只使用后端发送的准确 cwnd 事件，不再推断
     const cwndSamples = arr.filter((e) => e.kind === "dctcp_cwnd");
-    if (cwndSamples.length) {
-        return cwndSamples.map((e) => ({
-            t: Number(e.t_ns ?? 0),
-            cwnd: Number(e.cwnd_bytes ?? 0),
-            ssthresh: Number(e.ssthresh_bytes ?? 0),
-            inflight: Number(e.inflight_bytes ?? 0),
-            alpha: e.alpha != null ? Number(e.alpha) : null,
-            lastAck: null,
-            dup: null,
-            state: "DCTCP",
-            reason: "sample",
-        }));
-    }
-    const initCwnd = inferInitCwnd(arr, mss);
-    let cwnd = initCwnd;
-    let ssthresh = 1000 * mss;
-    let lastAck = 0;
-    let dup = 0;
-    let stateStr = "SS";
-    const infl = new Map();
-    const pts = [];
-
-    const inflightBytes = () => {
-        let s = 0;
-        for (const v of infl.values()) s += v;
-        return s;
-    };
-    const rec = (t, reason) =>
-        pts.push({ t, cwnd, ssthresh, inflight: inflightBytes(), lastAck, dup, state: stateStr, reason });
-
-    rec(Number(arr[0]?.t_ns ?? 0), "init");
-
-    for (const e of arr) {
-        const t = Number(e.t_ns ?? 0);
-        if (e.kind === "tcp_send_data") {
-            if (e.seq != null && e.len != null) infl.set(Number(e.seq), Number(e.len));
-            rec(t, "send_data");
-        } else if (e.kind === "tcp_recv_ack") {
-            const ack = Number(e.ack ?? 0);
-            if (ack > lastAck) {
-                dup = 0;
-                const newly = ack - lastAck;
-                lastAck = ack;
-                for (const [seq, len] of Array.from(infl.entries())) {
-                    if (seq + len <= ack) infl.delete(seq);
-                }
-                if (cwnd < ssthresh) {
-                    stateStr = "SS";
-                    cwnd = cwnd + newly;
-                } else {
-                    stateStr = "CA";
-                    const inc = Math.max(1, Math.floor((mss * mss) / Math.max(1, cwnd)));
-                    cwnd = cwnd + inc;
-                }
-                rec(t, "new_ack");
-            } else if (ack === lastAck) {
-                dup = dup + 1;
-                if (dup === 3) {
-                    stateStr = "FR";
-                    ssthresh = Math.max(Math.floor(cwnd / 2), 2 * mss);
-                    cwnd = ssthresh + 3 * mss;
-                    rec(t, "3_dupack");
-                } else if (dup > 3) {
-                    stateStr = "FR";
-                    cwnd = cwnd + mss;
-                    rec(t, "more_dupack");
-                } else {
-                    rec(t, "dupack");
-                }
-            }
-        } else if (e.kind === "tcp_rto") {
-            stateStr = "RTO";
-            ssthresh = Math.max(Math.floor(cwnd / 2), 2 * mss);
-            cwnd = mss;
-            dup = 0;
-            rec(t, "rto");
-        } else if (e.kind === "tcp_send_ack") {
-            rec(t, "send_ack");
-        }
-    }
-    return pts;
+    return cwndSamples.map((e) => ({
+        t: Number(e.t_ns ?? 0),
+        cwnd: Number(e.cwnd_bytes ?? 0),
+        ssthresh: Number(e.ssthresh_bytes ?? 0),
+        inflight: Number(e.inflight_bytes ?? 0),
+        alpha: e.alpha != null ? Number(e.alpha) : null,
+        lastAck: null,
+        dup: null,
+        state: null,
+        reason: "sample",
+    }));
 }
 
 function buildTcpTimeline(arr) {
@@ -275,10 +206,3 @@ function inferMss(arr) {
     return m || null;
 }
 
-function inferInitCwnd(arr, mss) {
-    const ds = arr.filter((e) => e.kind === "tcp_send_data" && e.t_ns != null && e.len != null);
-    if (!ds.length) return 10 * mss;
-    const tMin = Math.min(...ds.map((e) => Number(e.t_ns)));
-    const sum = ds.filter((e) => Number(e.t_ns) === tMin).reduce((s, e) => s + Number(e.len), 0);
-    return Math.max(mss, sum || 10 * mss);
-}

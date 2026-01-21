@@ -29,16 +29,16 @@ struct Args {
     #[arg(long, default_value_t = 1_000)]
     init_ssthresh_pkts: u64,
 
-    /// 初始 RTO（微秒）
+    /// 初始 RTO（毫秒）
     #[arg(long, default_value_t = 200)]
-    rto_us: u64,
+    rto_ms: u64,
 
-    /// 最小 RTO（微秒）
-    #[arg(long, default_value_t = 200)]
-    min_rto_us: u64,
+    /// 最小 RTO（毫秒）
+    #[arg(long, default_value_t = 1)]
+    min_rto_ms: u64,
 
     /// 最大 RTO（毫秒）
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = 60000)]
     max_rto_ms: u64,
 
     /// 启用三次握手
@@ -122,8 +122,8 @@ fn main() {
         ack_bytes: 64,
         init_cwnd_bytes: args.init_cwnd_pkts.saturating_mul(args.mss as u64),
         init_ssthresh_bytes: args.init_ssthresh_pkts.saturating_mul(args.mss as u64),
-        init_rto: SimTime::from_micros(args.rto_us),
-        min_rto: SimTime::from_micros(args.min_rto_us),
+        init_rto: SimTime::from_millis(args.rto_ms),
+        min_rto: SimTime::from_millis(args.min_rto_ms),
         max_rto: SimTime::from_millis(args.max_rto_ms),
         handshake: args.handshake,
         app_limited_pps: args.app_limited_pps,
