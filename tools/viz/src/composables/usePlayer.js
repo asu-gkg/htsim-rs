@@ -643,6 +643,29 @@ export function usePlayer() {
         drawTcpSubChartOnCtx(tcpCtx, null, pts, mss, area, cid, curP, true);
     }
 
+    // 计算 ssthresh 的稳态范围（排除初始极大值）
+    function computeStableSsthresh(ssVals, maxCwnd) {
+        if (!ssVals.length) return maxCwnd;
+        const firstVal = ssVals[0];
+        // 找第一次下降：ssthresh 变小的位置
+        let firstDropIdx = -1;
+        for (let i = 1; i < ssVals.length; i++) {
+            if (ssVals[i] < firstVal * 0.9) {
+                firstDropIdx = i;
+                break;
+            }
+        }
+        if (firstDropIdx === -1) {
+            // 没有下降过，说明没发生拥塞，用 cwnd 最大值的 1.5 倍
+            return maxCwnd * 1.5;
+        }
+        // 取下降后的最大值
+        const afterDropVals = ssVals.slice(firstDropIdx);
+        const maxAfterDrop = Math.max(...afterDropVals);
+        // 返回下降后最大值的 1.2 倍，留点余量
+        return maxAfterDrop * 1.2;
+    }
+
     function drawTcpSubChartOnCtx(ctx, canvas, pts, mss, area, cid, curP, isSmall = false) {
         const { x: ax, y: ay, w: aw, h: ah, title, field, color, fill } = area;
         // 放大版用更大的 padding
@@ -663,18 +686,16 @@ export function usePlayer() {
 
         // 计算该字段的 Y 轴范围
         let maxVal;
-        if (field === "all") {
+        if (field === "all" || field === "ssthresh") {
             const maxCwnd = Math.max(...pts.map((p) => p.cwnd ?? 0));
             const maxInflight = Math.max(...pts.map((p) => p.inflight ?? 0));
-            maxVal = Math.max(maxCwnd, maxInflight);
-        } else if (field === "ssthresh") {
-            const vals = pts.map((p) => p.ssthresh ?? 0);
-            const maxSsthresh = Math.max(...vals);
-            const minSsthresh = Math.min(...vals.filter(v => v > 0));
-            if (maxSsthresh > minSsthresh * 10) {
-                maxVal = Math.max(...pts.map((p) => p.cwnd ?? 0), ...pts.map((p) => p.inflight ?? 0));
+            // ssthresh：找第一次下降后的稳态值
+            const ssVals = pts.map((p) => p.ssthresh ?? 0);
+            const stableSsthresh = computeStableSsthresh(ssVals, maxCwnd);
+            if (field === "all") {
+                maxVal = Math.max(maxCwnd, maxInflight, stableSsthresh);
             } else {
-                maxVal = maxSsthresh;
+                maxVal = stableSsthresh;
             }
         } else {
             maxVal = Math.max(...pts.map((p) => p[field] ?? 0));
