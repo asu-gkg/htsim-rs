@@ -18,6 +18,9 @@ export function usePlayer() {
     let tcpCanvas = null;
     let tcpDetailCtx = null;
     let tcpDetailCanvas = null;
+    let tcpModalCtx = null;
+    let tcpModalCanvas = null;
+    let tcpCardRef = null;
     let rafId = 0;
 
     const state = reactive({
@@ -604,81 +607,263 @@ export function usePlayer() {
         if (!tcpCtx || !tcpCanvas) return;
         tcpCtx.clearRect(0, 0, tcpCanvas.width, tcpCanvas.height);
 
-        rr(tcpCtx, 0.5, 0.5, tcpCanvas.width - 1, tcpCanvas.height - 1, 14);
-        tcpCtx.fillStyle = "rgba(15,23,42,0.05)";
-        tcpCtx.fill();
-        tcpCtx.strokeStyle = "rgba(15,23,42,0.12)";
-        tcpCtx.stroke();
-
         const sel = selectTcpConn();
         const cid = sel.cid;
         const ser = sel.ser;
         if (cid == null || !ser) {
-            drawTcpBox("cwnd 时序：无 tcp_* / dctcp_cwnd 事件");
+            drawTcpBoxAt(tcpCanvas.width / 2, tcpCanvas.height / 2, "无 tcp_* / dctcp_cwnd 事件");
             return;
         }
         const pts = ser?.points || [];
         const mss = ser?.mss || 1460;
         if (!pts.length) {
-            drawTcpBox(`cwnd 时序：conn=${cid} 无可用数据点`);
+            drawTcpBoxAt(tcpCanvas.width / 2, tcpCanvas.height / 2, `conn=${cid} 无可用数据点`);
             return;
         }
 
-        const pad = { l: 70, r: 14, t: 22, b: 28 };
-        const width = tcpCanvas.width - pad.l - pad.r;
-        const height = tcpCanvas.height - pad.t - pad.b;
-        const xOf = (t) => pad.l + ((t - state.t0) / Math.max(1, state.t1 - state.t0)) * width;
-
-        const maxCwnd = Math.max(...pts.map((p) => p.cwnd));
-        const maxPkts = Math.max(2, Math.ceil(maxCwnd / mss) + 2);
-        const yOfPkts = (pkts) => pad.t + (1 - pkts / maxPkts) * height;
-
-        tcpCtx.save();
-        tcpCtx.strokeStyle = "rgba(15,23,42,0.12)";
-        tcpCtx.fillStyle = "rgba(15,23,42,0.75)";
-        tcpCtx.font = "11px JetBrains Mono, monospace";
-        for (let k = 0; k <= 4; k++) {
-            const pk = Math.round((maxPkts * k) / 4);
-            const y = yOfPkts(pk);
-            tcpCtx.beginPath();
-            tcpCtx.moveTo(pad.l, y);
-            tcpCtx.lineTo(pad.l + width, y);
-            tcpCtx.stroke();
-            tcpCtx.textAlign = "right";
-            tcpCtx.textBaseline = "middle";
-            tcpCtx.fillText(`${pk} pkts`, pad.l - 10, y);
-        }
-        tcpCtx.textAlign = "left";
-        tcpCtx.textBaseline = "top";
-        tcpCtx.fillText(`cwnd 时序（conn=${cid}，mss≈${mss}B）`, pad.l, 6);
-        tcpCtx.restore();
-
-        drawTcpLine(pts, "ssthresh", "rgba(15,23,42,0.4)", true, xOf, yOfPkts, mss);
-        drawTcpLine(pts, "inflight", "rgba(14,116,144,0.35)", false, xOf, yOfPkts, mss);
-        drawTcpLine(pts, "cwnd", "#0ea5e9", false, xOf, yOfPkts, mss);
+        // 2x2 子图布局
+        const gap = 12;
+        const subW = Math.floor((tcpCanvas.width - gap) / 2);
+        const subH = Math.floor((tcpCanvas.height - gap) / 2);
+        const areas = [
+            { x: 0, y: 0, w: subW, h: subH, title: "cwnd（拥塞窗口）", field: "cwnd", color: "#0ea5e9", fill: false },
+            { x: subW + gap, y: 0, w: subW, h: subH, title: "ssthresh（慢启动阈值）", field: "ssthresh", color: "#ef4444", fill: false },
+            { x: 0, y: subH + gap, w: subW, h: subH, title: "inflight（在途数据）", field: "inflight", color: "#22c55e", fill: true },
+            { x: subW + gap, y: subH + gap, w: subW, h: subH, title: "三者对比", field: "all", color: "", fill: false },
+        ];
 
         const curP = pickPointAt(pts, state.curTime);
-        if (curP) {
-            const x = xOf(curP.t);
-            const y = yOfPkts(curP.cwnd / mss);
-            tcpCtx.save();
-            tcpCtx.fillStyle = "#f59e0b";
-            tcpCtx.strokeStyle = "rgba(0,0,0,0.35)";
-            tcpCtx.lineWidth = 2;
-            tcpCtx.beginPath();
-            tcpCtx.arc(x, y, 6, 0, Math.PI * 2);
-            tcpCtx.fill();
-            tcpCtx.stroke();
-            tcpCtx.restore();
 
-            const stateStr = curP.state ?? "-";
-            const lastAck = curP.lastAck ?? "-";
-            const dup = curP.dup ?? "-";
-            const alpha = curP.alpha != null ? `  alpha=${Number(curP.alpha).toFixed(3)}` : "";
-            drawTcpBox(
-                `state=${stateStr}  cwnd=${fmtBytes(curP.cwnd)} (${(curP.cwnd / mss).toFixed(2)} pkts)  ssthresh=${fmtBytes(curP.ssthresh)}  inflight=${fmtBytes(curP.inflight)}  lastAck=${lastAck}  dupAck=${dup}${alpha}`
-            );
+        for (const area of areas) {
+            drawTcpSubChart(pts, mss, area, cid, curP);
         }
+    }
+
+    function drawTcpSubChart(pts, mss, area, cid, curP) {
+        drawTcpSubChartOnCtx(tcpCtx, null, pts, mss, area, cid, curP, true);
+    }
+
+    function drawTcpSubChartOnCtx(ctx, canvas, pts, mss, area, cid, curP, isSmall = false) {
+        const { x: ax, y: ay, w: aw, h: ah, title, field, color, fill } = area;
+        // 放大版用更大的 padding
+        const pad = isSmall ? { l: 50, r: 8, t: 18, b: 6 } : { l: 80, r: 20, t: 40, b: 30 };
+        const chartX = ax + pad.l;
+        const chartY = ay + pad.t;
+        const chartW = aw - pad.l - pad.r;
+        const chartH = ah - pad.t - pad.b;
+
+        // 背景
+        ctx.save();
+        rr(ctx, ax + 0.5, ay + 0.5, aw - 1, ah - 1, isSmall ? 8 : 12);
+        ctx.fillStyle = isSmall ? "rgba(15,23,42,0.03)" : "rgba(255,255,255,1)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15,23,42,0.1)";
+        ctx.stroke();
+        ctx.restore();
+
+        // 计算该字段的 Y 轴范围
+        let maxVal;
+        if (field === "all") {
+            const maxCwnd = Math.max(...pts.map((p) => p.cwnd ?? 0));
+            const maxInflight = Math.max(...pts.map((p) => p.inflight ?? 0));
+            maxVal = Math.max(maxCwnd, maxInflight);
+        } else if (field === "ssthresh") {
+            const vals = pts.map((p) => p.ssthresh ?? 0);
+            const maxSsthresh = Math.max(...vals);
+            const minSsthresh = Math.min(...vals.filter(v => v > 0));
+            if (maxSsthresh > minSsthresh * 10) {
+                maxVal = Math.max(...pts.map((p) => p.cwnd ?? 0), ...pts.map((p) => p.inflight ?? 0));
+            } else {
+                maxVal = maxSsthresh;
+            }
+        } else {
+            maxVal = Math.max(...pts.map((p) => p[field] ?? 0));
+        }
+        const maxPkts = Math.max(2, Math.ceil(maxVal / mss) + 1);
+
+        const xOf = (t) => chartX + ((t - state.t0) / Math.max(1, state.t1 - state.t0)) * chartW;
+        const yOf = (v) => chartY + (1 - v / mss / maxPkts) * chartH;
+
+        // 网格线
+        const gridLines = isSmall ? 2 : 5;
+        const fontSize = isSmall ? 9 : 12;
+        ctx.save();
+        ctx.strokeStyle = "rgba(15,23,42,0.08)";
+        ctx.fillStyle = "rgba(15,23,42,0.6)";
+        ctx.font = `${fontSize}px JetBrains Mono, monospace`;
+        for (let k = 0; k <= gridLines; k++) {
+            const pk = Math.round((maxPkts * k) / gridLines);
+            const y = chartY + (1 - k / gridLines) * chartH;
+            ctx.beginPath();
+            ctx.moveTo(chartX, y);
+            ctx.lineTo(chartX + chartW, y);
+            ctx.stroke();
+            ctx.textAlign = "right";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`${pk}`, chartX - 6, y);
+        }
+        ctx.restore();
+
+        // 标题
+        ctx.save();
+        ctx.fillStyle = "rgba(15,23,42,0.8)";
+        ctx.font = `${isSmall ? 10 : 16}px JetBrains Mono, monospace`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, ax + (isSmall ? 6 : 16), ay + (isSmall ? 4 : 12));
+        ctx.restore();
+
+        // Y 轴标签
+        if (!isSmall) {
+            ctx.save();
+            ctx.fillStyle = "rgba(15,23,42,0.5)";
+            ctx.font = "11px JetBrains Mono, monospace";
+            ctx.textAlign = "center";
+            ctx.save();
+            ctx.translate(ax + 16, chartY + chartH / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText("pkts", 0, 0);
+            ctx.restore();
+            ctx.restore();
+        }
+
+        // 绘制曲线
+        const lineWidth = isSmall ? 1.5 : 2.5;
+        if (field === "all") {
+            drawTcpLineInAreaOnCtx(ctx, pts, "inflight", "rgba(34,197,94,0.15)", "#22c55e", false, true, xOf, yOf, mss, chartX, chartY, chartW, chartH, lineWidth);
+            drawTcpLineInAreaOnCtx(ctx, pts, "ssthresh", "#ef4444", "#ef4444", true, false, xOf, yOf, mss, chartX, chartY, chartW, chartH, lineWidth);
+            drawTcpLineInAreaOnCtx(ctx, pts, "cwnd", "#0ea5e9", "#0ea5e9", false, false, xOf, yOf, mss, chartX, chartY, chartW, chartH, lineWidth);
+        } else {
+            drawTcpLineInAreaOnCtx(ctx, pts, field, fill ? `${color}30` : color, color, false, fill, xOf, yOf, mss, chartX, chartY, chartW, chartH, lineWidth);
+        }
+
+        // 图例（仅放大版且是 all 时显示）
+        if (!isSmall && field === "all") {
+            const legendX = chartX + chartW - 180;
+            const legendY = chartY + 10;
+            ctx.save();
+            ctx.fillStyle = "rgba(255,255,255,0.9)";
+            ctx.strokeStyle = "rgba(15,23,42,0.15)";
+            rr(ctx, legendX, legendY, 170, 70, 6);
+            ctx.fill();
+            ctx.stroke();
+
+            const items = [
+                { label: "cwnd", color: "#0ea5e9", dashed: false },
+                { label: "ssthresh", color: "#ef4444", dashed: true },
+                { label: "inflight", color: "#22c55e", dashed: false, fill: true },
+            ];
+            items.forEach((item, i) => {
+                const y = legendY + 15 + i * 18;
+                ctx.beginPath();
+                if (item.fill) {
+                    ctx.fillStyle = "rgba(34,197,94,0.3)";
+                    ctx.fillRect(legendX + 10, y - 5, 30, 10);
+                }
+                ctx.strokeStyle = item.color;
+                ctx.lineWidth = 2;
+                if (item.dashed) ctx.setLineDash([4, 3]);
+                else ctx.setLineDash([]);
+                ctx.moveTo(legendX + 10, y);
+                ctx.lineTo(legendX + 40, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = "rgba(15,23,42,0.8)";
+                ctx.font = "11px JetBrains Mono, monospace";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(item.label, legendX + 50, y);
+            });
+            ctx.restore();
+        }
+
+        // 当前时刻指示线
+        if (curP) {
+            const xNow = xOf(curP.t);
+            ctx.save();
+            ctx.strokeStyle = "rgba(245,158,11,0.7)";
+            ctx.lineWidth = isSmall ? 1 : 2;
+            ctx.beginPath();
+            ctx.moveTo(xNow, chartY);
+            ctx.lineTo(xNow, chartY + chartH);
+            ctx.stroke();
+            ctx.restore();
+
+            // 当前值
+            const val = field === "all" ? curP.cwnd : curP[field];
+            if (val != null) {
+                ctx.save();
+                ctx.fillStyle = "rgba(15,23,42,0.7)";
+                ctx.font = `${isSmall ? 9 : 13}px JetBrains Mono, monospace`;
+                ctx.textAlign = "right";
+                ctx.textBaseline = "top";
+                const valText = field === "all" 
+                    ? `cwnd:${(curP.cwnd/mss).toFixed(1)}  ssthresh:${(curP.ssthresh/mss).toFixed(1)}  inflight:${(curP.inflight/mss).toFixed(1)} pkts`
+                    : `${(val / mss).toFixed(1)} pkts`;
+                ctx.fillText(valText, ax + aw - (isSmall ? 6 : 16), ay + (isSmall ? 4 : 12));
+                ctx.restore();
+            }
+
+            // 放大版显示时间
+            if (!isSmall) {
+                ctx.save();
+                ctx.fillStyle = "rgba(245,158,11,0.9)";
+                ctx.font = "11px JetBrains Mono, monospace";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "top";
+                ctx.fillText(`t=${fmtMs(curP.t)}`, xNow, chartY + chartH + 6);
+                ctx.restore();
+            }
+        }
+    }
+
+    function drawTcpLineInAreaOnCtx(ctx, pts, field, fillColor, strokeColor, dashed, fill, xOf, yOf, mss, cx, cy, cw, ch, lineWidth = 1.5) {
+        if (!pts.length) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(cx, cy, cw, ch);
+        ctx.clip();
+
+        if (fill) {
+            const baseY = cy + ch;
+            ctx.fillStyle = fillColor;
+            ctx.beginPath();
+            ctx.moveTo(xOf(pts[0].t), baseY);
+            for (const p of pts) {
+                ctx.lineTo(xOf(p.t), yOf(p[field] ?? 0));
+            }
+            ctx.lineTo(xOf(pts[pts.length - 1].t), baseY);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = lineWidth;
+        if (dashed) ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        let first = true;
+        for (const p of pts) {
+            const x = xOf(p.t);
+            const y = yOf(p[field] ?? 0);
+            if (first) {
+                ctx.moveTo(x, y);
+                first = false;
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawTcpBoxAt(x, y, text) {
+        tcpCtx.save();
+        tcpCtx.fillStyle = "rgba(15,23,42,0.6)";
+        tcpCtx.font = "12px JetBrains Mono, monospace";
+        tcpCtx.textAlign = "center";
+        tcpCtx.textBaseline = "middle";
+        tcpCtx.fillText(text, x, y);
+        tcpCtx.restore();
     }
 
     function redrawTcpAll() {
@@ -686,10 +871,10 @@ export function usePlayer() {
         redrawTcpDetails();
     }
 
-    function drawTcpLine(pts, field, color, dashed, xOf, yOfPkts, mss) {
+    function drawTcpLine(pts, field, color, dashed, xOf, yOfPkts, mss, lineWidth = 2) {
         tcpCtx.save();
         tcpCtx.strokeStyle = color;
-        tcpCtx.lineWidth = 2;
+        tcpCtx.lineWidth = lineWidth;
         if (dashed) tcpCtx.setLineDash([6, 4]);
         tcpCtx.beginPath();
         let first = true;
@@ -704,6 +889,90 @@ export function usePlayer() {
             }
         }
         tcpCtx.stroke();
+        tcpCtx.restore();
+    }
+
+    function drawTcpLineWithFill(pts, field, fillColor, strokeColor, xOf, yOfPkts, mss) {
+        if (!pts.length) return;
+        const baseY = yOfPkts(0);
+        tcpCtx.save();
+        // 填充区域
+        tcpCtx.fillStyle = fillColor;
+        tcpCtx.beginPath();
+        tcpCtx.moveTo(xOf(pts[0].t), baseY);
+        for (const p of pts) {
+            tcpCtx.lineTo(xOf(p.t), yOfPkts(p[field] / mss));
+        }
+        tcpCtx.lineTo(xOf(pts[pts.length - 1].t), baseY);
+        tcpCtx.closePath();
+        tcpCtx.fill();
+        // 边线
+        tcpCtx.strokeStyle = strokeColor;
+        tcpCtx.lineWidth = 1.5;
+        tcpCtx.beginPath();
+        let first = true;
+        for (const p of pts) {
+            const x = xOf(p.t);
+            const y = yOfPkts(p[field] / mss);
+            if (first) {
+                tcpCtx.moveTo(x, y);
+                first = false;
+            } else {
+                tcpCtx.lineTo(x, y);
+            }
+        }
+        tcpCtx.stroke();
+        tcpCtx.restore();
+    }
+
+    function drawTcpLegend(x, y) {
+        const items = [
+            { label: "cwnd", color: "#0ea5e9", dashed: false },
+            { label: "ssthresh", color: "#ef4444", dashed: true },
+            { label: "inflight", color: "#22c55e", dashed: false, fill: true },
+        ];
+        const lineLen = 20;
+        const gap = 8;
+        const itemGap = 14;
+
+        tcpCtx.save();
+        // 背景
+        tcpCtx.fillStyle = "rgba(255,255,255,0.85)";
+        tcpCtx.strokeStyle = "rgba(15,23,42,0.2)";
+        tcpCtx.lineWidth = 1;
+        const boxW = 150;
+        const boxH = items.length * itemGap + 8;
+        tcpCtx.beginPath();
+        tcpCtx.roundRect(x, y, boxW, boxH, 4);
+        tcpCtx.fill();
+        tcpCtx.stroke();
+
+        tcpCtx.font = "10px JetBrains Mono, monospace";
+        tcpCtx.textAlign = "left";
+        tcpCtx.textBaseline = "middle";
+
+        items.forEach((item, i) => {
+            const ly = y + 8 + i * itemGap;
+            const lx = x + 8;
+            // 画线
+            tcpCtx.strokeStyle = item.color;
+            tcpCtx.lineWidth = item.fill ? 1.5 : 2;
+            if (item.dashed) tcpCtx.setLineDash([4, 3]);
+            else tcpCtx.setLineDash([]);
+            tcpCtx.beginPath();
+            tcpCtx.moveTo(lx, ly);
+            tcpCtx.lineTo(lx + lineLen, ly);
+            tcpCtx.stroke();
+            // 填充示例
+            if (item.fill) {
+                tcpCtx.fillStyle = "rgba(34,197,94,0.3)";
+                tcpCtx.fillRect(lx, ly - 4, lineLen, 8);
+            }
+            // 文字
+            tcpCtx.setLineDash([]);
+            tcpCtx.fillStyle = "#334155";
+            tcpCtx.fillText(item.label, lx + lineLen + gap, ly);
+        });
         tcpCtx.restore();
     }
 
@@ -1330,13 +1599,76 @@ export function usePlayer() {
 
     function setTcpCanvas(el) {
         if (!el) {
+            if (tcpCanvas) {
+                tcpCanvas.removeEventListener("click", onTcpCanvasClick);
+            }
             tcpCanvas = null;
             tcpCtx = null;
             return;
         }
         tcpCanvas = el;
         tcpCtx = el.getContext("2d");
+        el.addEventListener("click", onTcpCanvasClick);
+        el.style.cursor = "pointer";
         redrawTcpAll();
+    }
+
+    function setTcpCardRef(ref) {
+        tcpCardRef = ref;
+    }
+
+    function onTcpCanvasClick(e) {
+        if (!tcpCanvas || !tcpCardRef) return;
+        // 点击任意位置都打开放大的 4 子图视图
+        tcpCardRef.openModal();
+    }
+
+    function setTcpModalCanvas(el) {
+        if (!el) {
+            tcpModalCanvas = null;
+            tcpModalCtx = null;
+            return;
+        }
+        tcpModalCanvas = el;
+        tcpModalCtx = el.getContext("2d");
+        redrawTcpModal();
+    }
+
+    function onTcpModalClose() {
+        tcpModalCanvas = null;
+        tcpModalCtx = null;
+    }
+
+    function redrawTcpModal() {
+        if (!tcpModalCtx || !tcpModalCanvas) return;
+        const ctx = tcpModalCtx;
+        const canvas = tcpModalCanvas;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const sel = selectTcpConn();
+        const cid = sel.cid;
+        const ser = sel.ser;
+        if (cid == null || !ser) return;
+        const pts = ser?.points || [];
+        const mss = ser?.mss || 1460;
+        if (!pts.length) return;
+
+        const curP = pickPointAt(pts, state.curTime);
+
+        // 2x2 子图布局（放大版）
+        const gap = 20;
+        const subW = Math.floor((canvas.width - gap) / 2);
+        const subH = Math.floor((canvas.height - gap) / 2);
+        const areas = [
+            { x: 0, y: 0, w: subW, h: subH, title: "cwnd（拥塞窗口）", field: "cwnd", color: "#0ea5e9", fill: false },
+            { x: subW + gap, y: 0, w: subW, h: subH, title: "ssthresh（慢启动阈值）", field: "ssthresh", color: "#ef4444", fill: false },
+            { x: 0, y: subH + gap, w: subW, h: subH, title: "inflight（在途数据）", field: "inflight", color: "#22c55e", fill: true },
+            { x: subW + gap, y: subH + gap, w: subW, h: subH, title: "三者对比", field: "all", color: "", fill: false },
+        ];
+
+        for (const area of areas) {
+            drawTcpSubChartOnCtx(ctx, canvas, pts, mss, area, cid, curP, false);
+        }
     }
 
     function setTcpDetailCanvas(el) {
@@ -1370,6 +1702,9 @@ export function usePlayer() {
             onSlider,
             setNetCanvas,
             setTcpCanvas,
+            setTcpCardRef,
+            setTcpModalCanvas,
+            onTcpModalClose,
             setTcpDetailCanvas,
         },
     };
