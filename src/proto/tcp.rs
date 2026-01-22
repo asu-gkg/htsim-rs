@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::net::{with_tcp_stack, NetApi, NodeId, TcpSegment, Transport};
 use crate::sim::{Event, SimTime, Simulator, World};
+use crate::viz::VizCwndReason;
 
 /// 一个 TCP 连接的唯一标识（复用 `flow_id` 的语义）。
 pub type TcpConnId = u64;
@@ -547,6 +548,9 @@ impl TcpStack {
                 net.viz_tcp_recv_ack(sim.now().0, conn.id, ack, false);
 
                 if ack > conn.last_acked {
+                    let in_fast_recovery = conn.in_fast_recovery;
+                    let recover_point = conn.recover;
+                    let was_slow_start = !in_fast_recovery && conn.cwnd_bytes < conn.ssthresh_bytes;
                     let now = sim.now();
                     let mut rtt_sample = None;
                     for (&s, sent) in conn.inflight.iter() {
@@ -623,6 +627,17 @@ impl TcpStack {
                         }
                     }
 
+                    let reason = if in_fast_recovery {
+                        if ack >= recover_point {
+                            VizCwndReason::FastRecoveryExit
+                        } else {
+                            VizCwndReason::FastRecoveryPartialAck
+                        }
+                    } else if was_slow_start {
+                        VizCwndReason::AckSlowStart
+                    } else {
+                        VizCwndReason::AckCongestionAvoidance
+                    };
                     // 记录 cwnd 状态变化
                     net.viz_dctcp_cwnd(
                         sim.now().0,
@@ -631,6 +646,10 @@ impl TcpStack {
                         conn.ssthresh_bytes,
                         conn.inflight_bytes(),
                         0.0,
+                        reason,
+                        Some(newly_acked),
+                        None,
+                        None,
                     );
 
                     // 移除已确认段
@@ -662,6 +681,10 @@ impl TcpStack {
                             conn.ssthresh_bytes,
                             conn.inflight_bytes(),
                             0.0,
+                            VizCwndReason::FastRecoveryDupAck,
+                            None,
+                            None,
+                            None,
                         );
                         let id = conn.id;
                         let _ = conn;
@@ -700,6 +723,10 @@ impl TcpStack {
                             conn.ssthresh_bytes,
                             conn.inflight_bytes(),
                             0.0,
+                            VizCwndReason::FastRecoveryEnter,
+                            None,
+                            Some(dup),
+                            None,
                         );
                         let id = conn.id;
                         let _ = conn;
@@ -731,7 +758,18 @@ impl Event for TcpStart {
         with_tcp_stack(world, move |net, tcp| {
             tcp.insert(conn);
             // 记录初始 cwnd/ssthresh 状态
-            net.viz_dctcp_cwnd(sim.now().0, id, init_cwnd, init_ssthresh, 0, 0.0);
+            net.viz_dctcp_cwnd(
+                sim.now().0,
+                id,
+                init_cwnd,
+                init_ssthresh,
+                0,
+                0.0,
+                VizCwndReason::Init,
+                None,
+                None,
+                None,
+            );
             tcp.send_data_if_possible(id, sim, net);
         });
     }
@@ -816,6 +854,10 @@ impl Event for TcpRto {
                 conn.ssthresh_bytes,
                 conn.inflight_bytes(),
                 0.0,
+                VizCwndReason::RtoTimeout,
+                None,
+                None,
+                None,
             );
 
             // 重传 earliest unacked

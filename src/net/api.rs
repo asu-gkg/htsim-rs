@@ -1,6 +1,7 @@
 //! Network-facing API used by protocol stacks.
 
 use crate::sim::Simulator;
+use crate::viz::VizCwndReason;
 
 use super::{NodeId, Packet};
 
@@ -22,6 +23,10 @@ pub trait NetApi {
         ssthresh_bytes: u64,
         inflight_bytes: u64,
         alpha: f64,
+        reason: VizCwndReason,
+        acked_bytes: Option<u64>,
+        dup_acks: Option<u32>,
+        ecn_frac: Option<f64>,
     );
 }
 
@@ -62,6 +67,10 @@ impl NetApi for super::Network {
         ssthresh_bytes: u64,
         inflight_bytes: u64,
         alpha: f64,
+        reason: VizCwndReason,
+        acked_bytes: Option<u64>,
+        dup_acks: Option<u32>,
+        ecn_frac: Option<f64>,
     ) {
         self.viz_dctcp_cwnd(
             t_ns,
@@ -70,6 +79,10 @@ impl NetApi for super::Network {
             ssthresh_bytes,
             inflight_bytes,
             alpha,
+            reason,
+            acked_bytes,
+            dup_acks,
+            ecn_frac,
         )
     }
 }

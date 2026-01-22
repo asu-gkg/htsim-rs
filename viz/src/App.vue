@@ -1,6 +1,6 @@
 <template>
     <div class="app">
-        <SidebarPanel />
+        <SidebarPanel class="sidebar" />
         <main>
             <TopologyCard class="card-topology" :meta="player.computed.topologyStatus" @ready="player.actions.setNetCanvas" />
             <TcpCard
@@ -12,6 +12,7 @@
             />
             <TcpDetailsCard class="card-tcp-detail" @ready="player.actions.setTcpDetailCanvas" />
         </main>
+        <CurrentEventPanel class="event-panel" />
     </div>
 </template>
 
@@ -21,6 +22,7 @@ import SidebarPanel from "./components/SidebarPanel.vue";
 import TopologyCard from "./components/TopologyCard.vue";
 import TcpCard from "./components/TcpCard.vue";
 import TcpDetailsCard from "./components/TcpDetailsCard.vue";
+import CurrentEventPanel from "./components/CurrentEventPanel.vue";
 import { usePlayer } from "./composables/usePlayer";
 
 const player = usePlayer();

@@ -57,6 +57,16 @@ pub enum VizEventKind {
         ssthresh_bytes: u64,
         inflight_bytes: u64,
         alpha: f64,
+        reason: VizCwndReason,
+        /// ACK 增量（用于说明为何增长）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acked_bytes: Option<u64>,
+        /// dupACK 计数（用于说明快速重传/恢复）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dup_acks: Option<u32>,
+        /// DCTCP 窗口内 ECN 标记比例
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ecn_frac: Option<f64>,
     },
 }
 
@@ -75,6 +85,23 @@ pub enum VizPacketKind {
 pub enum VizNodeKind {
     Host,
     Switch,
+}
+
+/// cwnd 更新的触发原因（用于解释决策依据）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VizCwndReason {
+    Init,
+    AckSlowStart,
+    AckCongestionAvoidance,
+    FastRecoveryEnter,
+    FastRecoveryDupAck,
+    FastRecoveryPartialAck,
+    FastRecoveryExit,
+    DupAck3,
+    DupAckMore,
+    RtoTimeout,
+    DctcpEcnWindow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

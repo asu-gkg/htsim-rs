@@ -4,9 +4,9 @@
 Cargo.lock
 
 # Node.js / Frontend
-tools/viz/node_modules/
-tools/viz/dist/
-tools/viz/.vite/
+viz/node_modules/
+viz/dist/
+viz/.vite/
 *.log
 
 # Python

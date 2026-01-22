@@ -76,6 +76,10 @@
                 <button class="secondary" @click="actions.step" :disabled="!canPlay">单步</button>
             </div>
             <button class="secondary" @click="actions.jumpToDrop" :disabled="!canPlay">跳到下一次丢包</button>
+            <button class="secondary" @click="actions.jumpToTcpAdjust" :disabled="!canPlay">跳到下一次 TCP 状态调整</button>
+            <button class="secondary" @click="actions.jumpToTcpAdjustDifferent" :disabled="!canPlay">
+                跳到下一次 TCP 状态调整（不同）
+            </button>
             <div class="row">
                 <div>
                     <label>速度</label>
@@ -103,16 +107,17 @@
 
         <div class="section timeline">
             <h2>时间轴</h2>
-            <input type="range" min="0" max="1000" v-model.number="state.slider" @input="actions.onSlider" :disabled="!canPlay" />
+            <div class="timeline-track">
+                <input type="range" min="0" max="1000" v-model.number="state.slider" @input="actions.onSlider" :disabled="!canPlay" />
+                <div class="timeline-marks" aria-hidden="true">
+                    <span v-for="(mark, idx) in tcpAdjustMarks" :key="`tcp-mark-${idx}`" class="timeline-mark" :style="{ left: `${(mark * 100).toFixed(2)}%` }"></span>
+                </div>
+            </div>
             <div class="small">
                 <span class="kbd">空格</span>播放/暂停 <span class="kbd">←/→</span>单步
             </div>
+            <div class="small">蓝色刻度：TCP 状态调整时刻（cwnd/ssthresh/inflight 更新）</div>
             <div class="small status-line" :title="statusText">{{ statusText }}</div>
-        </div>
-
-        <div class="section grid">
-            <h2>当前事件</h2>
-            <pre class="log">{{ state.curText }}</pre>
         </div>
 
         <div class="section grid">
@@ -131,7 +136,7 @@ if (!player) {
 }
 
 const state = player.state;
-const { hasEvents, canPlay, metaNodesCount, metaLinksCount, layoutDetectedLabel, statusText } = player.computed;
+const { hasEvents, canPlay, metaNodesCount, metaLinksCount, layoutDetectedLabel, statusText, tcpAdjustMarks } = player.computed;
 const actions = player.actions;
 
 const fileInput = ref(null);

@@ -4,14 +4,14 @@
 - `src/lib.rs` is the crate root; core modules live under `src/sim/`, `src/net/`, `src/proto/`, `src/queue/`, and `src/viz/`.
 - `src/topo/` holds reusable topology builders (dumbbell/fat-tree).
 - `src/bin/` contains runnable binaries: `dumbbell`, `dumbbell_tcp`, `dumbbell_dctcp`, `fat_tree`, `trace_single_packet`.
-- `tools/viz/index.html` replays visualization JSON emitted by `--viz-json`.
+- `viz/index.html` replays visualization JSON emitted by `--viz-json`.
 - `tutorial.md` provides a deeper walkthrough; `parse_logs.py` formats tracing output.
 
 ## Build, Test, and Development Commands
 - `cargo build` compiles the library and binaries.
 - `cargo run --bin dumbbell -- --pkts 10000 --until-ms 50` runs the basic dumbbell sim.
 - `cargo run --bin trace_single_packet` runs the single packet trace.
-- `cargo run --bin dumbbell_tcp -- --viz-json out.json` runs TCP dumbbell and writes viz events for `tools/viz/index.html`.
+- `cargo run --bin dumbbell_tcp -- --viz-json out.json` runs TCP dumbbell and writes viz events for `viz/index.html`.
 - `cargo test` runs unit tests.
 
 ## Coding Style & Naming Conventions

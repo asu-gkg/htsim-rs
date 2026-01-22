@@ -2,7 +2,8 @@
 
 use crate::sim::SimTime;
 use crate::viz::{
-    VizEvent, VizEventKind, VizLinkInfo, VizNodeInfo, VizNodeKind, VizPacketKind, VizTcp,
+    VizCwndReason, VizEvent, VizEventKind, VizLinkInfo, VizNodeInfo, VizNodeKind, VizPacketKind,
+    VizTcp,
 };
 
 use super::{DctcpSegment, Network, NodeId, Packet, TcpSegment, Transport};
@@ -145,6 +146,10 @@ impl Network {
         ssthresh_bytes: u64,
         inflight_bytes: u64,
         alpha: f64,
+        reason: VizCwndReason,
+        acked_bytes: Option<u64>,
+        dup_acks: Option<u32>,
+        ecn_frac: Option<f64>,
     ) {
         self.viz_push(VizEvent {
             t_ns,
@@ -158,6 +163,10 @@ impl Network {
                 ssthresh_bytes,
                 inflight_bytes,
                 alpha,
+                reason,
+                acked_bytes,
+                dup_acks,
+                ecn_frac,
             },
         });
     }

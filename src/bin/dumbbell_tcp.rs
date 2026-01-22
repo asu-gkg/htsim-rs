@@ -67,7 +67,7 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     queue_pkts: u64,
 
-    /// 输出可视化 JSON 事件文件（供 `tools/viz/index.html` 加载）；不填则不生成
+    /// 输出可视化 JSON 事件文件（供 `viz/index.html` 加载）；不填则不生成
     #[arg(long)]
     viz_json: Option<PathBuf>,
 }

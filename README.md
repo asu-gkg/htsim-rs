@@ -9,7 +9,7 @@ Rust 网络仿真框架（事件驱动内核 + 基础网络组件 + 示例）。
 - `src/queue/`: 队列模型（DropTail 等）
 - `src/topo/`: 可复用拓扑构建（dumbbell/fat-tree 等）
 - `src/bin/`: 可执行示例
-- `tools/viz/`: 可视化回放页面
+- `viz/`: 可视化回放页面
 
 ## 运行
 Dumbbell 拓扑：

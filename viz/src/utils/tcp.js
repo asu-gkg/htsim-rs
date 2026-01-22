@@ -79,7 +79,10 @@ function buildCwndSeries(arr, mss) {
         lastAck: null,
         dup: null,
         state: null,
-        reason: "sample",
+        reason: e.reason ?? "sample",
+        acked_bytes: e.acked_bytes ?? null,
+        dup_acks: e.dup_acks ?? null,
+        ecn_frac: e.ecn_frac ?? null,
     }));
 }
 
@@ -205,4 +208,3 @@ function inferMss(arr) {
     }
     return m || null;
 }
-

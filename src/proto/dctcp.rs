@@ -13,6 +13,7 @@ use std::fmt;
 
 use crate::net::{with_dctcp_stack, DctcpSegment, Ecn, NetApi, NodeId, Transport};
 use crate::sim::{Event, SimTime, Simulator, World};
+use crate::viz::VizCwndReason;
 
 /// 一个 DCTCP 连接的唯一标识（复用 `flow_id` 的语义）。
 pub type DctcpConnId = u64;
@@ -287,6 +288,10 @@ impl DctcpStack {
                 c.ssthresh_bytes,
                 c.inflight_bytes(),
                 c.alpha,
+                VizCwndReason::Init,
+                None,
+                None,
+                None,
             );
         }
         self.send_data_if_possible(id, sim, net);
@@ -413,6 +418,7 @@ impl DctcpStack {
                 net.viz_tcp_recv_ack(sim.now().0, conn.id, ack, ecn_echo);
 
                 if ack > conn.last_acked {
+                    let was_slow_start = conn.cwnd_bytes < conn.ssthresh_bytes;
                     conn.dup_acks = 0;
                     let newly_acked = ack - conn.last_acked;
                     conn.last_acked = ack;
@@ -436,14 +442,18 @@ impl DctcpStack {
                         conn.marked_in_window = conn.marked_in_window.saturating_add(newly_acked);
                     }
 
+                    let mut ecn_frac = None;
+                    let mut ecn_window_marked = false;
                     if conn.last_acked >= conn.window_end {
                         let frac = if conn.acked_in_window == 0 {
                             0.0
                         } else {
                             conn.marked_in_window as f64 / conn.acked_in_window as f64
                         };
+                        ecn_frac = Some(frac);
                         conn.alpha = (1.0 - conn.cfg.g) * conn.alpha + conn.cfg.g * frac;
                         if conn.marked_in_window > 0 {
+                            ecn_window_marked = true;
                             let factor = 1.0 - conn.alpha / 2.0;
                             let new_cwnd = (conn.cwnd_bytes as f64 * factor)
                                 .max(conn.cfg.mss as f64)
@@ -465,6 +475,13 @@ impl DctcpStack {
                     }
 
                     let now = sim.now();
+                    let reason = if ecn_window_marked {
+                        VizCwndReason::DctcpEcnWindow
+                    } else if was_slow_start {
+                        VizCwndReason::AckSlowStart
+                    } else {
+                        VizCwndReason::AckCongestionAvoidance
+                    };
                     conn.record_cwnd(now);
                     net.viz_dctcp_cwnd(
                         now.0,
@@ -473,6 +490,10 @@ impl DctcpStack {
                         conn.ssthresh_bytes,
                         conn.inflight_bytes(),
                         conn.alpha,
+                        reason,
+                        Some(newly_acked),
+                        None,
+                        ecn_frac,
                     );
 
                     let done = conn.last_acked >= conn.total_bytes && conn.done_at.is_none();
@@ -496,6 +517,20 @@ impl DctcpStack {
                         if let Some(seq0) = conn.earliest_unacked_seq() {
                             conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
                             conn.cwnd_bytes = conn.ssthresh_bytes.saturating_add(3 * mss);
+                            let now = sim.now();
+                            conn.record_cwnd(now);
+                            net.viz_dctcp_cwnd(
+                                now.0,
+                                conn.id,
+                                conn.cwnd_bytes,
+                                conn.ssthresh_bytes,
+                                conn.inflight_bytes(),
+                                conn.alpha,
+                                VizCwndReason::DupAck3,
+                                None,
+                                Some(dup),
+                                None,
+                            );
                             let len = conn
                                 .inflight
                                 .get(&seq0)
@@ -520,6 +555,10 @@ impl DctcpStack {
                             conn.ssthresh_bytes,
                             conn.inflight_bytes(),
                             conn.alpha,
+                            VizCwndReason::DupAckMore,
+                            None,
+                            Some(dup),
+                            None,
                         );
                         self.send_data_if_possible(id, sim, net);
                     }
@@ -551,6 +590,10 @@ impl Event for DctcpStart {
                     c.ssthresh_bytes,
                     c.inflight_bytes(),
                     c.alpha,
+                    VizCwndReason::Init,
+                    None,
+                    None,
+                    None,
                 );
             }
             dctcp.send_data_if_possible(id, sim, net);
@@ -599,6 +642,10 @@ impl Event for DctcpRto {
                 conn.ssthresh_bytes,
                 conn.inflight_bytes(),
                 conn.alpha,
+                VizCwndReason::RtoTimeout,
+                None,
+                None,
+                None,
             );
 
             let mut pkt = conn.make_data_packet(net);

@@ -83,7 +83,7 @@ rust-gdb target/debug/dumbbell --args target/debug/dumbbell --pkts 1000 --until-
 ```bash
 
 cargo run --bin dumbbell_tcp -- \
-  --data-bytes 10000000 \
+  --data-bytes 1000000000 \
   --queue-pkts 16 \
   --bottleneck-gbps 1 \
   --link-latency-us 2000 \
@@ -120,7 +120,7 @@ cargo run --bin dumbbell_tcp -- \
 
 ### 可视化观察重点
 
-在 `tools/viz/index.html` 中加载生成的 `out.json`，重点关注：
+在 `viz/index.html` 中加载生成的 `out.json`，重点关注：
 
 - **cwnd 图**：慢启动（指数增长）→ 拥塞避免（线性增长）→ 丢包（减半）
 - **ssthresh 图**：每次丢包时下降到 cwnd/2

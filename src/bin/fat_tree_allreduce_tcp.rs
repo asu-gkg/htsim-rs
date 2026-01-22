@@ -61,7 +61,7 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     queue_pkts: u64,
 
-    /// Output visualization JSON (for tools/viz/index.html)
+    /// Output visualization JSON (for viz/index.html)
     #[arg(long)]
     viz_json: Option<PathBuf>,
 
