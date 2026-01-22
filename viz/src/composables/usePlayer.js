@@ -683,6 +683,7 @@ export function usePlayer() {
         resetPlayback();
     });
     watch(() => state.connPick, () => tcp.redrawAll());
+    watch(() => state.windowMode, () => tcp.redrawAll());
 
     function setNetCanvas(el) {
         if (!el) {

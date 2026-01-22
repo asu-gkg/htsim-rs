@@ -427,8 +427,8 @@ export function createTcpController(state) {
 
         const pad = { l: 90, r: 18, t: 16, b: 16 };
         const gap = 20;
-        const seqHeight = Math.round(h * 0.48);
-        const windowHeight = Math.round(h * 0.16);
+        const seqHeight = Math.round(h * 0.44);
+        const windowHeight = Math.round(h * 0.22);
         const infoHeight = h - pad.t - pad.b - seqHeight - windowHeight - gap * 2;
         const seqArea = { x: pad.l, y: pad.t, w: w - pad.l - pad.r, h: seqHeight };
         const windowArea = { x: pad.l, y: seqArea.y + seqArea.h + gap, w: seqArea.w, h: windowHeight };
@@ -659,24 +659,43 @@ export function createTcpController(state) {
         const fillPct = cwnd > 0 ? inflight / cwnd : 0;
 
         const mssBytes = Math.max(1, mss);
-        const range = Math.max(16 * mssBytes, cwnd * 1.2, inflightRaw * 1.2, 2 * mssBytes);
-        const xOfDelta = (d) => area.x + (d / range) * area.w;
-        const y = area.y + area.h * 0.65;
+        const windowMode = state.windowMode === "scale" ? "scale" : "slide";
+        let left = 0;
+        let right = 0;
+        if (windowMode === "scale") {
+            const FIX_MSS = 128;
+            const fixedSpan = FIX_MSS * mssBytes;
+            left = Math.max(0, lastAck - fixedSpan * 0.1);
+            right = left + fixedSpan;
+        } else {
+            const leftPad = Math.max(2 * mssBytes, cwnd * 0.1);
+            const rightPad = Math.max(2 * mssBytes, cwnd * 0.2);
+            left = Math.max(0, lastAck - leftPad);
+            right = lastAck + cwnd + rightPad;
+            right = Math.max(right, maxSent + rightPad);
+        }
+        if (right <= left) right = left + Math.max(4 * mssBytes, cwnd, 1);
+        const range = Math.max(1, right - left);
+        const xOfAbs = (s) => area.x + ((s - left) / range) * area.w;
+        const summaryY = area.y + 2;
+        const y = area.y + area.h * 0.75;
 
         const cwndMss = mssBytes > 0 ? cwnd / mssBytes : 0;
         const inflightMss = mssBytes > 0 ? inflightRaw / mssBytes : 0;
         const availMss = mssBytes > 0 ? avail / mssBytes : 0;
         const stateStr = inferRenoState(curP?.state, curP?.reason);
         const reasonText = reasonShort(curP?.reason);
-        const explainLine = `t=${fmtMs(state.curTime)} | ${stateStr} | ${reasonText} | c=${cwndMss.toFixed(
+        const explainLine = `t=${fmtMs(state.curTime)} | ${stateStr} | ${reasonText} | c(cwnd)=${cwndMss.toFixed(
             0
-        )}M i=${inflightMss.toFixed(0)}M a=${availMss.toFixed(0)}M f=${Math.round(fillPct * 100)}%`;
+        )}M i(inflight)=${inflightMss.toFixed(0)}M a(avail)=${availMss.toFixed(0)}M f(fill)=${Math.round(
+            fillPct * 100
+        )}%`;
         addText(
             textLayer,
             explainLine,
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             area.x,
-            area.y + 2,
+            summaryY,
             0,
             0
         );
@@ -687,45 +706,47 @@ export function createTcpController(state) {
         const stepChoices = [1, 2, 4, 8, 16, 32, 64, 128, 256];
         const step = stepChoices.find((s) => s >= roughStep) || stepChoices[stepChoices.length - 1];
 
+        const stepBytes = step * mssBytes;
+        const tickStart = Math.ceil(left / stepBytes) * stepBytes;
         let lastTick = -Infinity;
-        for (let k = 0; k <= rangeMss + 1e-6; k += step) {
-            const d = k * mssBytes;
-            const x = xOfDelta(d);
+        const tickLabelY = Math.min(y + 14, area.y + area.h - 2);
+        for (let s = tickStart; s <= right + 1e-6; s += stepBytes) {
+            const x = xOfAbs(s);
             setLineStyle(g, 1, "rgba(15,23,42,0.18)");
             g.moveTo(x, y - 8);
             g.lineTo(x, y + 8);
             addText(
                 textLayer,
-                `${Math.round(k)}M`,
+                fmtBytes(s),
                 { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
                 x,
-                y + 12,
+                tickLabelY,
                 0.5,
                 0
             );
-            lastTick = k;
+            lastTick = s;
         }
-        if (rangeMss - lastTick > step * 0.3) {
-            const k = rangeMss;
-            const x = xOfDelta(k * mssBytes);
+        if (right - lastTick > stepBytes * 0.3) {
+            const x = xOfAbs(right);
             setLineStyle(g, 1, "rgba(15,23,42,0.18)");
             g.moveTo(x, y - 8);
             g.lineTo(x, y + 8);
             addText(
                 textLayer,
-                `${Math.round(k)}M`,
+                fmtBytes(right),
                 { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
                 x,
-                y + 12,
+                tickLabelY,
                 0.5,
                 0
             );
         }
 
         const barH = 12;
-        const x0 = xOfDelta(0);
-        const xEnd = xOfDelta(cwnd);
-        const xFill = xOfDelta(Math.min(inflightRaw, cwnd));
+        const winEnd = lastAck + cwnd;
+        const x0 = xOfAbs(lastAck);
+        const xEnd = xOfAbs(winEnd);
+        const xFill = xOfAbs(Math.min(maxSent, winEnd));
 
         beginFill(g, "rgba(14,165,233,0.10)");
         drawRoundedRect(g, x0, y - barH / 2, Math.max(1, xEnd - x0), barH, 6);
@@ -739,11 +760,11 @@ export function createTcpController(state) {
         g.moveTo(area.x, y);
         g.lineTo(area.x + area.w, y);
 
-        if (inflightRaw > cwnd) {
+        if (maxSent > winEnd) {
             setLineStyle(g, 4, "#ef4444");
-            g.moveTo(xOfDelta(cwnd), y);
-            g.lineTo(xOfDelta(inflightRaw), y);
-            const xOver = xOfDelta(inflightRaw);
+            g.moveTo(xEnd, y);
+            g.lineTo(xOfAbs(maxSent), y);
+            const xOver = xOfAbs(maxSent);
             setLineStyle(g, 2, "#ef4444");
             g.moveTo(xOver - 6, y - 4);
             g.lineTo(xOver, y);
@@ -753,7 +774,7 @@ export function createTcpController(state) {
         const markerH = 10;
         setLineStyle(g, 2, "#0f172a");
         const xAck = x0;
-        const xSent = xOfDelta(inflightRaw);
+        const xSent = xOfAbs(maxSent);
         g.moveTo(xAck, y - markerH);
         g.lineTo(xAck, y + markerH);
         g.moveTo(xEnd, y - markerH);
@@ -763,7 +784,7 @@ export function createTcpController(state) {
         g.moveTo(xSent, y - markerH);
         g.lineTo(xSent, y + markerH);
 
-        const labelBaseY = y - 14;
+        const labelBaseY = y - 16;
         const labelStep = 12;
         const minLabelGap = 28;
         let yAckLabel = labelBaseY;

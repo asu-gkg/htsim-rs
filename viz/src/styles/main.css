@@ -292,7 +292,7 @@ button:not(:disabled):hover {
 
 canvas {
     width: 100%;
-    height: clamp(260px, 32vh, 420px);
+    height: 50%;
     border-radius: 18px;
     border: 1px solid rgba(15, 23, 42, 0.08);
     background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), rgba(15, 23, 42, 0.06));
@@ -308,7 +308,7 @@ canvas.topology {
 }
 
 canvas.tcp-detail {
-    height: clamp(320px, 40vh, 520px);
+    height: clamp(440px, 58vh, 820px);
 }
 
 .card-topology {
@@ -650,7 +650,7 @@ input[type="range"] {
         height: 200px;
     }
     canvas.tcp-detail {
-        height: 300px;
+        height: 420px;
     }
 }
 
@@ -681,7 +681,7 @@ input[type="range"] {
         height: 180px;
     }
     canvas.tcp-detail {
-        height: 260px;
+        height: 360px;
     }
 }
 .panel-toggle-icon {

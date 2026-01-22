@@ -66,6 +66,11 @@
                 <option v-for="cid in state.connOptions" :key="cid" :value="String(cid)">{{ cid }}</option>
             </select>
             <div class="small">优先 flow_id，其次自动选当前时间点最近的连接。</div>
+            <label>窗口视窗模式</label>
+            <select v-model="state.windowMode" :disabled="!hasEvents">
+                <option value="slide">slide（滑动）</option>
+                <option value="scale">scale（固定尺度）</option>
+            </select>
         </div>
 
         <div class="section grid">

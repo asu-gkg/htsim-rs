@@ -4,7 +4,7 @@
             <div class="canvas-title">TCP 机制拆解</div>
             <div class="canvas-meta">Sequence-Time / Window / RTT-RTO / 状态机</div>
         </div>
-        <canvas ref="canvas" class="tcp-detail" width="1100" height="260"></canvas>
+        <canvas ref="canvas" class="tcp-detail" width="1100" height="800"></canvas>
         <div class="legend">
             蓝色竖线=发送数据段，橙色=重传，绿色三角=ACK，红色=ECN Echo/RTO。
         </div>
