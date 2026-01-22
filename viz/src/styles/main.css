@@ -10,8 +10,8 @@
     --ok: #16a34a;
     --warn: #e11d48;
     --shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
-    --sidebar-w: clamp(300px, 26vw, 420px);
-    --event-w: clamp(260px, 22vw, 360px);
+    --sidebar-w: clamp(240px, 20vw, 320px);
+    --event-w: clamp(240px, 20vw, 320px);
 }
 
 * {
@@ -30,12 +30,21 @@ body {
 }
 
 .app {
-    display: grid;
-    grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--event-w);
-    grid-template-areas: "sidebar main event";
-    gap: 20px;
+    --sidebar-offset: calc(var(--sidebar-w) + 32px);
+    --event-offset: calc(var(--event-w) + 32px);
+    --left-toggle-x: 6px;
+    --right-toggle-x: 6px;
+    position: relative;
     padding: 16px;
     min-height: 100vh;
+}
+
+.app.sidebar-hidden {
+    --sidebar-offset: 0px;
+}
+
+.app.event-hidden {
+    --event-offset: 0px;
 }
 
 aside {
@@ -44,31 +53,38 @@ aside {
     border-radius: 22px;
     padding: 18px 18px 16px;
     box-shadow: var(--shadow);
-    position: sticky;
-    top: 18px;
-    align-self: start;
     animation: rise 0.5s ease both;
     min-width: 0;
-    max-height: calc(100vh - 36px);
     overflow: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
 }
 
 .sidebar {
-    grid-area: sidebar;
+    position: fixed;
+    top: 16px;
+    bottom: 16px;
+    left: 16px;
+    width: var(--sidebar-w);
+    z-index: 20;
 }
 
 .event-panel {
-    grid-area: event;
+    position: fixed;
+    top: 16px;
+    bottom: 16px;
+    right: 16px;
+    width: var(--event-w);
+    z-index: 20;
 }
 
 main {
-    grid-area: main;
     display: grid;
     gap: 18px;
     animation: rise 0.6s ease both;
     min-width: 0;
+    padding-left: var(--sidebar-offset);
+    padding-right: var(--event-offset);
     grid-template-areas:
         "topology"
         "tcp"
@@ -106,6 +122,34 @@ h2 {
     border-top: 1px dashed var(--line);
     padding-top: 12px;
     margin-top: 12px;
+}
+
+.panel-toggle {
+    position: fixed;
+    top: 16px;
+    height: 40px;
+    z-index: 30;
+    width: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    border-radius: 16px;
+    padding: 8px 0;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.35);
+    color: rgba(15, 23, 42, 0.75);
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px) saturate(160%);
+}
+
+.panel-toggle.left {
+    left: var(--left-toggle-x);
+}
+
+.panel-toggle.right {
+    right: var(--right-toggle-x);
 }
 
 .grid {
@@ -403,7 +447,14 @@ canvas.tcp-detail {
     color: #0369a1;
 }
 
-.event-filter-chip.parent-off {
+.event-filter-chip.pass {
+    border-color: #0ea5e9;
+    background: rgba(14, 165, 233, 0.16);
+    color: #0369a1;
+    box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.2);
+}
+
+.event-filter-chip.blocked {
     opacity: 0.55;
 }
 
@@ -566,17 +617,17 @@ input[type="range"] {
 
 @media (max-width: 1100px) {
     .app {
-        grid-template-columns: 1fr;
-        grid-template-areas:
-            "sidebar"
-            "main"
-            "event";
-        padding: 16px;
+        --sidebar-offset: 0px;
+        --event-offset: 0px;
+        --left-toggle-x: 6px;
+        --right-toggle-x: 6px;
+        padding: 12px;
     }
-    aside {
-        position: static;
-        max-height: none;
-        overflow: visible;
+    .sidebar,
+    .event-panel {
+        top: 12px;
+        bottom: 12px;
+        width: min(280px, 82vw);
     }
     .row {
         grid-template-columns: 1fr;
@@ -604,8 +655,17 @@ input[type="range"] {
 
 @media (max-width: 720px) {
     .app {
-        padding: 12px;
-        gap: 16px;
+        padding: 10px;
+    }
+    .panel-toggle {
+        top: 10px;
+        height: 36px;
+        width: 22px;
+        font-size: 10px;
+    }
+    .sidebar,
+    .event-panel {
+        width: min(260px, 88vw);
     }
     .log {
         height: 24vh;
@@ -622,4 +682,10 @@ input[type="range"] {
     canvas.tcp-detail {
         height: 220px;
     }
+}
+.panel-toggle-icon {
+    font-size: 15px;
+    line-height: 1;
+    font-weight: 700;
+    opacity: 0.8;
 }

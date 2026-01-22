@@ -60,7 +60,8 @@
                         :class="[
                             { off: eventTypeFilters[item.kind] },
                             { sub: item.group === 'cwnd_reason' },
-                            { 'parent-off': item.group === 'cwnd_reason' && cwndDisabled },
+                            { pass: item.group === 'cwnd_reason' && cwndDisabled && !eventTypeFilters[item.kind] },
+                            { blocked: item.group === 'cwnd_reason' && cwndDisabled && eventTypeFilters[item.kind] },
                         ]"
                         @click="actions.toggleEventKind(item.kind)"
                     >
@@ -71,7 +72,7 @@
                     v-if="group.id === 'cwnd_reason' && cwndDisabled"
                     class="event-filter-note event-filter-note-inline"
                 >
-                    窗口调整总开关已关闭，原因过滤暂不生效。
+                    总开关关闭时，蓝色为放行，灰色为隐藏。
                 </div>
             </div>
         </div>

@@ -1,6 +1,6 @@
 <template>
-    <div class="app">
-        <SidebarPanel class="sidebar" />
+    <div class="app" :class="{ 'sidebar-hidden': !showSidebar, 'event-hidden': !showEvent }">
+        <SidebarPanel v-show="showSidebar" class="sidebar" />
         <main>
             <TopologyCard class="card-topology" :meta="player.computed.topologyStatus" @ready="player.actions.setNetCanvas" />
             <TcpCard
@@ -12,7 +12,13 @@
             />
             <TcpDetailsCard class="card-tcp-detail" @ready="player.actions.setTcpDetailCanvas" />
         </main>
-        <CurrentEventPanel class="event-panel" />
+        <CurrentEventPanel v-show="showEvent" class="event-panel" />
+        <button class="panel-toggle left" type="button" @click="showSidebar = !showSidebar">
+            <span class="panel-toggle-icon">{{ showSidebar ? "«" : "»" }}</span>
+        </button>
+        <button class="panel-toggle right" type="button" @click="showEvent = !showEvent">
+            <span class="panel-toggle-icon">{{ showEvent ? "»" : "«" }}</span>
+        </button>
     </div>
 </template>
 
@@ -27,6 +33,8 @@ import { usePlayer } from "./composables/usePlayer";
 
 const player = usePlayer();
 const tcpCardRef = ref(null);
+const showSidebar = ref(true);
+const showEvent = ref(true);
 
 provide("player", player);
 

@@ -46,6 +46,7 @@ export function usePlayer() {
     ];
     const baseKinds = eventTypeCatalog.filter((item) => item.group === "base").map((item) => item.kind);
     const baseKindsNoAll = baseKinds.filter((kind) => kind !== "base_all");
+    const cwndReasonKinds = cwndReasonCatalog.map((item) => `cwnd_reason:${item.reason}`);
     for (const item of eventTypeCatalog) {
         if (state.eventTypeFilter[item.kind] == null) {
             state.eventTypeFilter[item.kind] = false;
@@ -185,9 +186,12 @@ export function usePlayer() {
     function isEventVisible(ev) {
         if (!ev || !ev.kind) return true;
         if (ev.kind === "dctcp_cwnd") {
-            if (state.eventTypeFilter.dctcp_cwnd) return false;
             const reasonKey = cwndReasonKey(ev.reason);
+            if (state.eventTypeFilter.dctcp_cwnd) {
+                return !state.eventTypeFilter[reasonKey];
+            }
             if (state.eventTypeFilter[reasonKey]) return false;
+            return true;
         }
         return !state.eventTypeFilter[ev.kind];
     }
@@ -561,6 +565,15 @@ export function usePlayer() {
 
     function toggleEventKind(kind) {
         if (!kind) return;
+        if (kind === "dctcp_cwnd") {
+            const next = !state.eventTypeFilter.dctcp_cwnd;
+            state.eventTypeFilter.dctcp_cwnd = next;
+            for (const k of cwndReasonKinds) {
+                state.eventTypeFilter[k] = next;
+            }
+            applyFilter({ preserveTime: true });
+            return;
+        }
         if (kind === "base_all") {
             const next = !state.eventTypeFilter.base_all;
             state.eventTypeFilter.base_all = next;
