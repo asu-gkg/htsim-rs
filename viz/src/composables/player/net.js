@@ -17,6 +17,7 @@ import {
     destroyPixiApp,
     drawDashedLine,
     drawRoundedRect,
+    resizePixiApp,
     setLineStyle,
 } from "../../utils/pixi";
 
@@ -52,23 +53,29 @@ export function createNetRenderer(state) {
         app.stage.addChild(linkLayer, linkLabelLayer, nodeLayer, nodeLabelLayer, packetLayer);
     }
 
+    function ensureCanvasSize() {
+        if (!app || !canvas) return { width: 0, height: 0 };
+        return resizePixiApp(app, canvas);
+    }
+
     function applyLayout() {
-        const width = canvas?.width || 1100;
-        const height = canvas?.height || 360;
+        const { width, height } = ensureCanvasSize();
+        const layoutW = width || 1100;
+        const layoutH = height || 360;
         const metaNodes = state.meta?.nodes;
         const nodesList = metaNodes && Array.isArray(metaNodes) ? metaNodes.slice().sort((a, b) => a.id - b.id) : defaultNodes;
         const linksList = state.meta?.links || defaultLinks;
         let layout = null;
         if (state.layoutChoice === "fat-tree") {
-            layout = layoutFatTree(nodesList, width, height) || layoutCircle(nodesList, width, height);
+            layout = layoutFatTree(nodesList, layoutW, layoutH) || layoutCircle(nodesList, layoutW, layoutH);
         } else if (state.layoutChoice === "dumbbell") {
-            layout = layoutDumbbell(nodesList, linksList, width, height) || layoutCircle(nodesList, width, height);
+            layout = layoutDumbbell(nodesList, linksList, layoutW, layoutH) || layoutCircle(nodesList, layoutW, layoutH);
         } else if (state.layoutChoice === "circle") {
-            layout = layoutCircle(nodesList, width, height);
+            layout = layoutCircle(nodesList, layoutW, layoutH);
         } else {
-            layout = layoutFatTree(nodesList, width, height);
-            if (!layout) layout = layoutDumbbell(nodesList, linksList, width, height);
-            if (!layout) layout = layoutCircle(nodesList, width, height);
+            layout = layoutFatTree(nodesList, layoutW, layoutH);
+            if (!layout) layout = layoutDumbbell(nodesList, linksList, layoutW, layoutH);
+            if (!layout) layout = layoutCircle(nodesList, layoutW, layoutH);
         }
         state.nodes = layout.nodes;
         state.nodeScale = layout.scale;
@@ -199,6 +206,7 @@ export function createNetRenderer(state) {
 
     function redraw() {
         if (!app || !linkLayer || !nodeLayer || !packetLayer) return;
+        ensureCanvasSize();
         linkLayer.clear();
         nodeLayer.clear();
         packetLayer.clear();
@@ -314,7 +322,7 @@ export function createNetRenderer(state) {
         const textFill = totalDrop > 0 ? "#dc2626" : isBottleneck ? "#d97706" : "#334155";
         const textObj = new Text(text, {
             fontFamily: "JetBrains Mono, monospace",
-            fontSize: 10,
+            fontSize: 11,
             fill: textFill,
         });
         textObj.anchor.set(0.5, 0.5);
@@ -338,7 +346,7 @@ export function createNetRenderer(state) {
         const hl = state.nodeHighlight.get(n.id);
         const isHl = hl && hl.until >= state.curTime;
         const r = (n.kind === "switch" ? 24 : 20) * state.nodeScale;
-        const fontSize = Math.max(8, Math.round(12 * state.nodeScale));
+        const fontSize = Math.max(9, Math.round(13 * state.nodeScale));
         beginFill(nodeLayer, isHl ? "rgba(14,116,144,0.25)" : "rgba(255,255,255,0.85)");
         setLineStyle(nodeLayer, 2, isHl ? "rgba(14,116,144,0.8)" : "rgba(15,23,42,0.25)");
         nodeLayer.drawCircle(n.x, n.y, r);

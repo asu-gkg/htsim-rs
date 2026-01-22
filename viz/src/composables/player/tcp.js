@@ -10,6 +10,7 @@ import {
     drawDashedLine,
     drawDashedPolyline,
     drawRoundedRect,
+    resizePixiApp,
     setLineStyle,
 } from "../../utils/pixi";
 
@@ -37,6 +38,11 @@ export function createTcpController(state) {
         if (!surface) return;
         surface.graphics.clear();
         clearTextLayer(surface.textLayer);
+    }
+
+    function ensureSurfaceSize(surface) {
+        if (!surface?.app || !surface?.canvas) return { width: 0, height: 0 };
+        return resizePixiApp(surface.app, surface.canvas);
     }
 
     function resetTracking() {
@@ -105,27 +111,27 @@ export function createTcpController(state) {
 
     function redrawTcp() {
         if (!mainSurface) return;
+        const { width: canvasW, height: canvasH } = ensureSurfaceSize(mainSurface);
         clearSurface(mainSurface);
-        const { canvas } = mainSurface;
 
         const sel = selectTcpConn();
         const cid = sel.cid;
         const ser = sel.ser;
         if (cid == null || !ser) {
-            drawTcpBoxAt(mainSurface, canvas.width / 2, canvas.height / 2, "无 tcp_* / dctcp_cwnd 事件");
+            drawTcpBoxAt(mainSurface, canvasW / 2, canvasH / 2, "无 tcp_* / dctcp_cwnd 事件");
             return;
         }
         const pts = ser?.points || [];
         const mss = ser?.mss || 1460;
         if (!pts.length) {
-            drawTcpBoxAt(mainSurface, canvas.width / 2, canvas.height / 2, `conn=${cid} 无可用数据点`);
+            drawTcpBoxAt(mainSurface, canvasW / 2, canvasH / 2, `conn=${cid} 无可用数据点`);
             return;
         }
 
         // 2x2 子图布局
         const gap = 12;
-        const subW = Math.floor((canvas.width - gap) / 2);
-        const subH = Math.floor((canvas.height - gap) / 2);
+        const subW = Math.floor((canvasW - gap) / 2);
+        const subH = Math.floor((canvasH - gap) / 2);
         const areas = [
             { x: 0, y: 0, w: subW, h: subH, title: "cwnd（拥塞窗口）", field: "cwnd", color: "#0ea5e9", fill: false },
             { x: subW + gap, y: 0, w: subW, h: subH, title: "ssthresh（慢启动阈值）", field: "ssthresh", color: "#ef4444", fill: false },
@@ -180,7 +186,7 @@ export function createTcpController(state) {
 
         // 网格线
         const gridLines = isSmall ? 2 : 5;
-        const fontSize = isSmall ? 9 : 12;
+        const fontSize = isSmall ? 11 : 13;
         setLineStyle(g, 1, "rgba(15,23,42,0.08)");
         for (let k = 0; k <= gridLines; k++) {
             const pk = Math.round((maxPkts * k) / gridLines);
@@ -202,7 +208,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             title,
-            { fontFamily: fontMono, fontSize: isSmall ? 10 : 16, fill: "rgba(15,23,42,0.8)" },
+            { fontFamily: fontMono, fontSize: isSmall ? 12 : 18, fill: "rgba(15,23,42,0.8)" },
             ax + (isSmall ? 6 : 16),
             ay + (isSmall ? 4 : 12),
             0,
@@ -214,7 +220,7 @@ export function createTcpController(state) {
             addText(
                 textLayer,
                 "pkts",
-                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.5)" },
+                { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.5)" },
                 ax + 16,
                 chartY + chartH / 2,
                 0.5,
@@ -264,7 +270,7 @@ export function createTcpController(state) {
                 addText(
                     textLayer,
                     item.label,
-                    { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.8)" },
+                    { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.8)" },
                     legendX + 50,
                     y,
                     0,
@@ -290,7 +296,7 @@ export function createTcpController(state) {
                 addText(
                     textLayer,
                     valText,
-                    { fontFamily: fontMono, fontSize: isSmall ? 9 : 13, fill: "rgba(15,23,42,0.7)" },
+                    { fontFamily: fontMono, fontSize: isSmall ? 11 : 14, fill: "rgba(15,23,42,0.7)" },
                     ax + aw - (isSmall ? 6 : 16),
                     ay + (isSmall ? 4 : 12),
                     1,
@@ -303,7 +309,7 @@ export function createTcpController(state) {
                 addText(
                     textLayer,
                     `t=${fmtMs(curP.t)}`,
-                    { fontFamily: fontMono, fontSize: 11, fill: "rgba(245,158,11,0.9)" },
+                    { fontFamily: fontMono, fontSize: 12, fill: "rgba(245,158,11,0.9)" },
                     xNow,
                     chartY + chartH + 6,
                     0.5,
@@ -338,7 +344,12 @@ export function createTcpController(state) {
 
     function drawTcpLineInArea(g, pts, field, fillColor, strokeColor, dashed, fill, xOf, yOf, cx, cy, cw, ch, lineWidth = 1.5) {
         if (!pts.length) return;
-        const points = pts.map((p) => [xOf(p.t), yOf(p[field] ?? 0)]);
+        const clampY = (y) => Math.min(cy + ch, Math.max(cy, y));
+        const points = pts.map((p) => {
+            const x = xOf(p.t);
+            const y = yOf(p[field] ?? 0);
+            return [x, clampY(y)];
+        });
         if (fill) {
             const baseY = cy + ch;
             beginFill(g, fillColor);
@@ -381,11 +392,12 @@ export function createTcpController(state) {
 
     function redrawTcpDetails() {
         if (!detailSurface) return;
+        const { width: canvasW, height: canvasH } = ensureSurfaceSize(detailSurface);
         clearSurface(detailSurface);
         const g = detailSurface.graphics;
         const textLayer = detailSurface.textLayer;
-        const w = detailSurface.canvas.width;
-        const h = detailSurface.canvas.height;
+        const w = canvasW;
+        const h = canvasH;
 
         setLineStyle(g, 1, "rgba(15,23,42,0.12)");
         beginFill(g, "rgba(15,23,42,0.04)");
@@ -454,7 +466,7 @@ export function createTcpController(state) {
             addText(
                 textLayer,
                 fmtBytes(seq),
-                { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
                 seqArea.x - 10,
                 y,
                 1,
@@ -469,7 +481,7 @@ export function createTcpController(state) {
             addText(
                 textLayer,
                 fmtMs(t),
-                { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
                 x,
                 seqArea.y + seqArea.h + 4,
                 0.5,
@@ -479,7 +491,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             `Sequence-Time（conn=${cid}）`,
-            { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             seqArea.x,
             Math.max(2, seqArea.y - 12),
             0,
@@ -570,7 +582,7 @@ export function createTcpController(state) {
             addText(
                 textLayer,
                 line,
-                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
+                { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.75)" },
                 textArea.x,
                 y,
                 0,
@@ -589,7 +601,7 @@ export function createTcpController(state) {
             addText(
                 textLayer,
                 "Send window：无可用数据",
-                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.6)" },
+                { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.6)" },
                 area.x,
                 area.y + area.h / 2,
                 0,
@@ -630,7 +642,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             "last_ack",
-            { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             xOf(lastAck),
             y - 12,
             0.5,
@@ -639,7 +651,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             "win_end",
-            { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             xOf(windowEnd),
             y - 12,
             0.5,
@@ -648,7 +660,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             `send window=${fmtBytes(cwnd)}  inflight=${fmtBytes(inflight)}`,
-            { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.75)" },
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             area.x,
             area.y + area.h + 2,
             0,
@@ -704,7 +716,7 @@ export function createTcpController(state) {
         addText(
             textLayer,
             label,
-            { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.65)" },
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
             area.x,
             area.y + h * 2 + gap + 4,
             0,
@@ -733,10 +745,11 @@ export function createTcpController(state) {
 
     function drawDetailBox(text) {
         if (!detailSurface) return;
+        const { width: canvasW, height: canvasH } = ensureSurfaceSize(detailSurface);
         const g = detailSurface.graphics;
         const x = 14;
-        const y = detailSurface.canvas.height - 52;
-        const w = detailSurface.canvas.width - 28;
+        const y = canvasH - 52;
+        const w = canvasW - 28;
         const h = 38;
         setLineStyle(g, 1, "rgba(255,255,255,0.12)");
         beginFill(g, "rgba(15,23,42,0.55)");
@@ -745,7 +758,7 @@ export function createTcpController(state) {
         addText(
             detailSurface.textLayer,
             text,
-            { fontFamily: fontMono, fontSize: 11, fill: "rgba(255,255,255,0.95)" },
+            { fontFamily: fontMono, fontSize: 12, fill: "rgba(255,255,255,0.95)" },
             x + 10,
             y + h / 2,
             0,
@@ -800,8 +813,8 @@ export function createTcpController(state) {
 
     function redrawTcpModal() {
         if (!modalSurface) return;
+        const { width: canvasW, height: canvasH } = ensureSurfaceSize(modalSurface);
         clearSurface(modalSurface);
-        const { canvas } = modalSurface;
 
         const sel = selectTcpConn();
         const cid = sel.cid;
@@ -815,8 +828,8 @@ export function createTcpController(state) {
 
         // 2x2 子图布局（放大版）
         const gap = 20;
-        const subW = Math.floor((canvas.width - gap) / 2);
-        const subH = Math.floor((canvas.height - gap) / 2);
+        const subW = Math.floor((canvasW - gap) / 2);
+        const subH = Math.floor((canvasH - gap) / 2);
         const areas = [
             { x: 0, y: 0, w: subW, h: subH, title: "cwnd（拥塞窗口）", field: "cwnd", color: "#0ea5e9", fill: false },
             { x: subW + gap, y: 0, w: subW, h: subH, title: "ssthresh（慢启动阈值）", field: "ssthresh", color: "#ef4444", fill: false },

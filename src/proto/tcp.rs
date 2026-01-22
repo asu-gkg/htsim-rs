@@ -266,6 +266,9 @@ impl TcpConn {
 
     fn effective_cwnd(&self) -> u64 {
         let mut cwnd = self.cwnd_bytes;
+        if self.in_fast_recovery {
+            cwnd = cwnd.min(self.ssthresh_bytes);
+        }
         let Some(pps) = self.cfg.app_limited_pps else {
             return cwnd;
         };
@@ -619,7 +622,10 @@ impl TcpStack {
                     } else {
                         // 拥塞控制：慢启动 / 拥塞避免（极简）
                         if conn.cwnd_bytes < conn.ssthresh_bytes {
-                            conn.cwnd_bytes = conn.cwnd_bytes.saturating_add(newly_acked);
+                            let capped = newly_acked.min(mss);
+                            let room = conn.ssthresh_bytes.saturating_sub(conn.cwnd_bytes);
+                            let inc = capped.min(room);
+                            conn.cwnd_bytes = conn.cwnd_bytes.saturating_add(inc);
                         } else {
                             // AIMD：每个 ACK 让 cwnd 以 mss^2/cwnd 增长（至少 +1）
                             let inc = (mss.saturating_mul(mss) / conn.cwnd_bytes).max(1);

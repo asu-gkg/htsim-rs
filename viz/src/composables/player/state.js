@@ -13,7 +13,7 @@ export function createPlayerState() {
         connPick: "auto",
         connOptions: [],
         speed: 1,
-        targetWallSec: 12,
+        targetWallSec: 20,
         playing: false,
         t0: 0,
         t1: 0,

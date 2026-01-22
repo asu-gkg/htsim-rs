@@ -300,7 +300,7 @@ canvas {
 }
 
 canvas.tcp {
-    height: clamp(280px, 36vh, 420px);
+    height: clamp(420px, 56vh, 680px);
 }
 
 canvas.topology {
@@ -308,7 +308,7 @@ canvas.topology {
 }
 
 canvas.tcp-detail {
-    height: clamp(240px, 30vh, 380px);
+    height: clamp(320px, 40vh, 520px);
 }
 
 .card-topology {
@@ -608,10 +608,11 @@ input[type="range"] {
 
 @media (min-width: 1500px) {
     main {
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-columns: 1fr;
         grid-template-areas:
-            "topology topology"
-            "tcp detail";
+            "topology"
+            "tcp"
+            "detail";
     }
 }
 
@@ -643,13 +644,13 @@ input[type="range"] {
         height: 280px;
     }
     canvas.tcp {
-        height: 280px;
+        height: 400px;
     }
     canvas.topology {
         height: 200px;
     }
     canvas.tcp-detail {
-        height: 240px;
+        height: 300px;
     }
 }
 
@@ -674,13 +675,13 @@ input[type="range"] {
         height: 240px;
     }
     canvas.tcp {
-        height: 260px;
+        height: 340px;
     }
     canvas.topology {
         height: 180px;
     }
     canvas.tcp-detail {
-        height: 220px;
+        height: 260px;
     }
 }
 .panel-toggle-icon {

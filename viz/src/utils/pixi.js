@@ -1,20 +1,44 @@
 import { Application, Text } from "pixi.js";
 
+function getCanvasCssSize(canvas) {
+    if (!canvas) return { width: 0, height: 0 };
+    const rect = typeof canvas.getBoundingClientRect === "function" ? canvas.getBoundingClientRect() : null;
+    const width = Math.round(rect?.width || canvas.clientWidth || canvas.width || 0);
+    const height = Math.round(rect?.height || canvas.clientHeight || canvas.height || 0);
+    return { width, height };
+}
+
 export function createPixiApp(canvas) {
-    const width = canvas?.width || canvas?.clientWidth || 0;
-    const height = canvas?.height || canvas?.clientHeight || 0;
+    const { width, height } = getCanvasCssSize(canvas);
+    const resolution = typeof window !== "undefined" ? Math.max(1, window.devicePixelRatio || 1) : 1;
     return new Application({
         view: canvas,
-        width,
-        height,
+        width: width || canvas?.width || 0,
+        height: height || canvas?.height || 0,
         antialias: true,
         backgroundAlpha: 0,
+        autoDensity: true,
+        resolution,
     });
 }
 
 export function destroyPixiApp(app) {
     if (!app) return;
     app.destroy(true, { children: true, texture: true, baseTexture: true });
+}
+
+export function resizePixiApp(app, canvas) {
+    if (!app || !canvas) return { width: 0, height: 0 };
+    const { width, height } = getCanvasCssSize(canvas);
+    if (!width || !height) return { width: app.screen.width, height: app.screen.height };
+    const resolution = typeof window !== "undefined" ? Math.max(1, window.devicePixelRatio || 1) : 1;
+    const needsResize =
+        app.screen.width !== width || app.screen.height !== height || app.renderer.resolution !== resolution;
+    if (needsResize) {
+        app.renderer.resolution = resolution;
+        app.renderer.resize(width, height);
+    }
+    return { width: app.screen.width, height: app.screen.height };
 }
 
 export function parseColor(input, fallback = 0x000000, fallbackAlpha = 1) {
