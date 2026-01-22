@@ -425,14 +425,16 @@ export function createTcpController(state) {
             return;
         }
 
-        const pad = { l: 70, r: 18, t: 16, b: 16 };
-        const gap = 12;
+        const pad = { l: 90, r: 18, t: 16, b: 16 };
+        const gap = 20;
         const seqHeight = Math.round(h * 0.48);
         const windowHeight = Math.round(h * 0.16);
         const infoHeight = h - pad.t - pad.b - seqHeight - windowHeight - gap * 2;
         const seqArea = { x: pad.l, y: pad.t, w: w - pad.l - pad.r, h: seqHeight };
         const windowArea = { x: pad.l, y: seqArea.y + seqArea.h + gap, w: seqArea.w, h: windowHeight };
         const infoArea = { x: pad.l, y: windowArea.y + windowArea.h + gap, w: seqArea.w, h: infoHeight };
+        const curWin = pickPointAt(windowPoints, state.curTime);
+        const curP = pickPointAt(pts, state.curTime);
 
         let minSeq = Infinity;
         let maxSeq = -Infinity;
@@ -498,6 +500,40 @@ export function createTcpController(state) {
             0
         );
 
+        if (curWin && curP?.cwnd != null) {
+            const lastAck = Number(curWin.lastAck ?? 0);
+            const maxSent = Number(curWin.maxSent ?? lastAck);
+            const winEnd = lastAck + Number(curP.cwnd ?? 0);
+            const y1 = yOf(lastAck);
+            const y2 = yOf(winEnd);
+            const top = Math.min(y1, y2);
+            const hh = Math.abs(y1 - y2);
+            beginFill(g, "rgba(14,165,233,0.06)");
+            g.drawRect(seqArea.x, top, seqArea.w, hh);
+            g.endFill();
+            const ys = yOf(maxSent);
+            setLineStyle(g, 1, "rgba(14,165,233,0.35)");
+            drawDashedLine(g, seqArea.x, ys, seqArea.x + seqArea.w, ys, 4, 4);
+            addText(
+                textLayer,
+                "window band: [last_ack, win_end]",
+                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
+                seqArea.x + 4,
+                seqArea.y + 4,
+                0,
+                0
+            );
+            addText(
+                textLayer,
+                "dashed: max_sent",
+                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
+                seqArea.x + 4,
+                seqArea.y + 18,
+                0,
+                0
+            );
+        }
+
         setLineStyle(g, 1, "rgba(100,116,139,0.55)");
         for (const l of ackLinks) {
             const y = yOf(l.send_seq);
@@ -546,8 +582,7 @@ export function createTcpController(state) {
 
         drawWindowBar(detailSurface, windowArea, windowPoints, pts, mss);
 
-        const curP = pickPointAt(pts, state.curTime);
-        const stateStr = curP?.state ?? "-";
+        const stateStr = inferRenoState(curP?.state, curP?.reason);
         const stateArea = { x: infoArea.x, y: infoArea.y, w: Math.min(220, infoArea.w * 0.42), h: infoArea.h };
         const textArea = {
             x: stateArea.x + stateArea.w + 12,
@@ -565,7 +600,13 @@ export function createTcpController(state) {
         }
         const reasonText = explainTcpReason(stateStr, curP?.reason);
         const alphaText = curP?.alpha != null ? Number(curP.alpha).toFixed(3) : "-";
-        const inflightText = curP?.inflight != null ? fmtBytes(curP.inflight) : "-";
+        let inflightBytesUI = null;
+        if (curWin) {
+            const la = Number(curWin.lastAck ?? 0);
+            const ms = Number(curWin.maxSent ?? la);
+            inflightBytesUI = Math.max(0, ms - la);
+        }
+        const inflightText = inflightBytesUI != null ? fmtBytes(inflightBytesUI) : "-";
         const rttText = rttP ? fmtMs(rttP.rtt) : "-";
         const srttText = rttP ? fmtMs(rttP.srtt) : "-";
         const rtoText = rttP ? fmtMs(rttP.rto) : "-";
@@ -612,59 +653,154 @@ export function createTcpController(state) {
         const lastAck = Number(curWin.lastAck ?? 0);
         const maxSent = Number(curWin.maxSent ?? lastAck);
         const cwnd = Number(curP.cwnd ?? 0);
-        const windowEnd = lastAck + cwnd;
-        const inflight = Math.max(0, maxSent - lastAck);
-        let minSeq = Math.max(0, lastAck - cwnd * 0.1);
-        let maxSeq = Math.max(windowEnd, maxSent, lastAck + mss);
-        if (maxSeq <= minSeq) maxSeq = minSeq + mss * 2;
-        const range = Math.max(1, maxSeq - minSeq);
-        const xOf = (s) => area.x + ((s - minSeq) / range) * area.w;
-        const y = area.y + area.h / 2;
+        const inflightRaw = Math.max(0, maxSent - lastAck);
+        const inflight = Math.min(inflightRaw, cwnd);
+        const avail = Math.max(0, cwnd - inflightRaw);
+        const fillPct = cwnd > 0 ? inflight / cwnd : 0;
 
-        setLineStyle(g, 6, "rgba(15,23,42,0.25)");
+        const mssBytes = Math.max(1, mss);
+        const range = Math.max(16 * mssBytes, cwnd * 1.2, inflightRaw * 1.2, 2 * mssBytes);
+        const xOfDelta = (d) => area.x + (d / range) * area.w;
+        const y = area.y + area.h * 0.65;
+
+        const cwndMss = mssBytes > 0 ? cwnd / mssBytes : 0;
+        const inflightMss = mssBytes > 0 ? inflightRaw / mssBytes : 0;
+        const availMss = mssBytes > 0 ? avail / mssBytes : 0;
+        const stateStr = inferRenoState(curP?.state, curP?.reason);
+        const reasonText = reasonShort(curP?.reason);
+        const explainLine = `t=${fmtMs(state.curTime)} | ${stateStr} | ${reasonText} | c=${cwndMss.toFixed(
+            0
+        )}M i=${inflightMss.toFixed(0)}M a=${availMss.toFixed(0)}M f=${Math.round(fillPct * 100)}%`;
+        addText(
+            textLayer,
+            explainLine,
+            { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
+            area.x,
+            area.y + 2,
+            0,
+            0
+        );
+
+        const rangeMss = range / mssBytes;
+        const targetTicks = 6;
+        const roughStep = rangeMss / targetTicks;
+        const stepChoices = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+        const step = stepChoices.find((s) => s >= roughStep) || stepChoices[stepChoices.length - 1];
+
+        let lastTick = -Infinity;
+        for (let k = 0; k <= rangeMss + 1e-6; k += step) {
+            const d = k * mssBytes;
+            const x = xOfDelta(d);
+            setLineStyle(g, 1, "rgba(15,23,42,0.18)");
+            g.moveTo(x, y - 8);
+            g.lineTo(x, y + 8);
+            addText(
+                textLayer,
+                `${Math.round(k)}M`,
+                { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
+                x,
+                y + 12,
+                0.5,
+                0
+            );
+            lastTick = k;
+        }
+        if (rangeMss - lastTick > step * 0.3) {
+            const k = rangeMss;
+            const x = xOfDelta(k * mssBytes);
+            setLineStyle(g, 1, "rgba(15,23,42,0.18)");
+            g.moveTo(x, y - 8);
+            g.lineTo(x, y + 8);
+            addText(
+                textLayer,
+                `${Math.round(k)}M`,
+                { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
+                x,
+                y + 12,
+                0.5,
+                0
+            );
+        }
+
+        const barH = 12;
+        const x0 = xOfDelta(0);
+        const xEnd = xOfDelta(cwnd);
+        const xFill = xOfDelta(Math.min(inflightRaw, cwnd));
+
+        beginFill(g, "rgba(14,165,233,0.10)");
+        drawRoundedRect(g, x0, y - barH / 2, Math.max(1, xEnd - x0), barH, 6);
+        g.endFill();
+
+        beginFill(g, "rgba(14,165,233,0.85)");
+        drawRoundedRect(g, x0, y - barH / 2, Math.max(1, xFill - x0), barH, 6);
+        g.endFill();
+
+        setLineStyle(g, 1, "rgba(15,23,42,0.25)");
         g.moveTo(area.x, y);
         g.lineTo(area.x + area.w, y);
 
-        setLineStyle(g, 10, "rgba(15,23,42,0.15)");
-        g.moveTo(xOf(lastAck), y);
-        g.lineTo(xOf(windowEnd), y);
+        if (inflightRaw > cwnd) {
+            setLineStyle(g, 4, "#ef4444");
+            g.moveTo(xOfDelta(cwnd), y);
+            g.lineTo(xOfDelta(inflightRaw), y);
+            const xOver = xOfDelta(inflightRaw);
+            setLineStyle(g, 2, "#ef4444");
+            g.moveTo(xOver - 6, y - 4);
+            g.lineTo(xOver, y);
+            g.lineTo(xOver - 6, y + 4);
+        }
 
-        setLineStyle(g, 10, "#0ea5e9");
-        g.moveTo(xOf(lastAck), y);
-        g.lineTo(xOf(Math.min(maxSent, windowEnd)), y);
-
+        const markerH = 10;
         setLineStyle(g, 2, "#0f172a");
-        g.moveTo(xOf(lastAck), y - 10);
-        g.lineTo(xOf(lastAck), y + 10);
-        g.moveTo(xOf(windowEnd), y - 10);
-        g.lineTo(xOf(windowEnd), y + 10);
+        const xAck = x0;
+        const xSent = xOfDelta(inflightRaw);
+        g.moveTo(xAck, y - markerH);
+        g.lineTo(xAck, y + markerH);
+        g.moveTo(xEnd, y - markerH);
+        g.lineTo(xEnd, y + markerH);
+
+        setLineStyle(g, 2, "rgba(14,165,233,0.85)");
+        g.moveTo(xSent, y - markerH);
+        g.lineTo(xSent, y + markerH);
+
+        const labelBaseY = y - 14;
+        const labelStep = 12;
+        const minLabelGap = 28;
+        let yAckLabel = labelBaseY;
+        let ySentLabel = labelBaseY;
+        let yEndLabel = labelBaseY;
+        if (Math.abs(xEnd - xAck) < minLabelGap) yEndLabel = labelBaseY - labelStep;
+        if (Math.abs(xSent - xAck) < minLabelGap) ySentLabel = labelBaseY - labelStep;
+        if (Math.abs(xSent - xEnd) < minLabelGap) {
+            ySentLabel = yEndLabel === labelBaseY ? labelBaseY - labelStep : labelBaseY - labelStep * 2;
+        }
 
         addText(
             textLayer,
-            "last_ack",
+            "ACK",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
-            xOf(lastAck),
-            y - 12,
+            xAck,
+            yAckLabel,
             0.5,
             1
         );
         addText(
             textLayer,
-            "win_end",
+            "SENT",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
-            xOf(windowEnd),
-            y - 12,
+            xSent,
+            ySentLabel,
             0.5,
             1
         );
         addText(
             textLayer,
-            `send window=${fmtBytes(cwnd)}  inflight=${fmtBytes(inflight)}`,
+            "END",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
-            area.x,
-            area.y + area.h + 2,
-            0,
-            0
+            xEnd,
+            yEndLabel,
+            0.5,
+            1
         );
     }
 
@@ -722,6 +858,35 @@ export function createTcpController(state) {
             0,
             0
         );
+    }
+
+    function inferRenoState(stateStr, reason) {
+        if (stateStr && stateStr !== "-") return stateStr;
+        if (!reason) return "-";
+        if (reason === "init" || reason === "ack_slow_start") return "SS";
+        if (reason === "ack_congestion_avoidance") return "CA";
+        if (reason.startsWith("fast_recovery") || reason.startsWith("dup_ack")) return "FR";
+        if (reason === "rto_timeout") return "RTO";
+        return "-";
+    }
+
+    function reasonShort(reason) {
+        if (!reason) return "-";
+        const map = {
+            init: "init",
+            ack_slow_start: "new ACK (SS)",
+            ack_congestion_avoidance: "new ACK (CA)",
+            fast_recovery_enter: "dupACKx3 enter FR",
+            fast_recovery_dup_ack: "dupACK inflate",
+            fast_recovery_partial_ack: "partial ACK",
+            fast_recovery_exit: "exit FR",
+            dup_ack_3: "dupACKx3",
+            dup_ack_more: "dupACK more",
+            rto_timeout: "RTO timeout",
+            dctcp_ecn_window: "ECN sample",
+            sample: "sample",
+        };
+        return map[reason] || reason;
     }
 
     function explainTcpReason(stateStr, reason) {
