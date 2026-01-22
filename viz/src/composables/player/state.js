@@ -35,6 +35,7 @@ export function createPlayerState() {
         linkStats: new Map(),
         tcpStats: { send_data: 0, send_ack: 0, recv_ack: 0, rto: 0, retrans: 0 },
         tcpSeries: new Map(),
+        tcpDetailLabels: [],
         windowMode: "slide",
         curText: "（空）",
         statsText: "（空）",

@@ -4,7 +4,19 @@
             <div class="canvas-title">TCP 机制拆解</div>
             <div class="canvas-meta">Sequence-Time / Window / RTT-RTO / 状态机</div>
         </div>
-        <canvas ref="canvas" class="tcp-detail" width="1100" height="800"></canvas>
+        <div class="tcp-detail-wrap">
+            <canvas ref="canvas" class="tcp-detail" width="1100" height="800"></canvas>
+            <div class="tcp-detail-overlay" aria-hidden="true">
+                <span
+                    v-for="(label, idx) in state.tcpDetailLabels"
+                    :key="`tcp-detail-label-${idx}`"
+                    class="tcp-detail-label"
+                    :style="labelStyle(label)"
+                >
+                    {{ label.text }}
+                </span>
+            </div>
+        </div>
         <div class="legend">
             蓝色竖线=发送数据段，橙色=重传，绿色三角=ACK，红色=ECN Echo/RTO。
         </div>
@@ -12,12 +24,34 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref } from "vue";
 
 defineProps({});
 
+const player = inject("player");
+if (!player) {
+    throw new Error("player store not provided");
+}
+
+const state = player.state;
+
 const emit = defineEmits(["ready"]);
 const canvas = ref(null);
+const labelStyle = (label) => {
+    const anchorX = Number(label.anchorX ?? 0);
+    const anchorY = Number(label.anchorY ?? 0);
+    const translate = `translate(${-anchorX * 100}%, ${-anchorY * 100}%)`;
+    const rotate = label.rotation ? ` rotate(${label.rotation}rad)` : "";
+    return {
+        left: `${label.x}px`,
+        top: `${label.y}px`,
+        color: label.color,
+        fontFamily: label.fontFamily,
+        fontSize: `${label.fontSize}px`,
+        fontWeight: label.fontWeight || "normal",
+        transform: `${translate}${rotate}`,
+    };
+};
 
 onMounted(() => {
     emit("ready", canvas.value);

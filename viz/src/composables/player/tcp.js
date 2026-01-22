@@ -385,17 +385,44 @@ export function createTcpController(state) {
         );
     }
 
+    function resetDetailLabels() {
+        if (!state.tcpDetailLabels) {
+            state.tcpDetailLabels = [];
+            return;
+        }
+        state.tcpDetailLabels.length = 0;
+    }
+
+    function addDetailText(text, style, x, y, anchorX = 0, anchorY = 0, rotation = 0) {
+        if (!state.tcpDetailLabels) state.tcpDetailLabels = [];
+        state.tcpDetailLabels.push({
+            text,
+            x,
+            y,
+            anchorX,
+            anchorY,
+            rotation,
+            fontFamily: style?.fontFamily || fontMono,
+            fontSize: style?.fontSize || 11,
+            color: style?.fill || "rgba(15,23,42,0.75)",
+            fontWeight: style?.fontWeight || "normal",
+        });
+    }
+
     function redrawAll() {
         redrawTcp();
         redrawTcpDetails();
     }
 
     function redrawTcpDetails() {
-        if (!detailSurface) return;
+        if (!detailSurface) {
+            resetDetailLabels();
+            return;
+        }
+        resetDetailLabels();
         const { width: canvasW, height: canvasH } = ensureSurfaceSize(detailSurface);
         clearSurface(detailSurface);
         const g = detailSurface.graphics;
-        const textLayer = detailSurface.textLayer;
         const w = canvasW;
         const h = canvasH;
 
@@ -465,8 +492,7 @@ export function createTcpController(state) {
             const y = yOf(seq);
             g.moveTo(seqArea.x, y);
             g.lineTo(seqArea.x + seqArea.w, y);
-            addText(
-                textLayer,
+            addDetailText(
                 fmtBytes(seq),
                 { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
                 seqArea.x - 10,
@@ -480,8 +506,7 @@ export function createTcpController(state) {
             const x = xOf(t);
             g.moveTo(x, seqArea.y);
             g.lineTo(x, seqArea.y + seqArea.h);
-            addText(
-                textLayer,
+            addDetailText(
                 fmtMs(t),
                 { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
                 x,
@@ -490,8 +515,7 @@ export function createTcpController(state) {
                 0
             );
         }
-        addText(
-            textLayer,
+        addDetailText(
             `Sequence-Time（conn=${cid}）`,
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             seqArea.x,
@@ -514,8 +538,7 @@ export function createTcpController(state) {
             const ys = yOf(maxSent);
             setLineStyle(g, 1, "rgba(14,165,233,0.35)");
             drawDashedLine(g, seqArea.x, ys, seqArea.x + seqArea.w, ys, 4, 4);
-            addText(
-                textLayer,
+            addDetailText(
                 "window band: [last_ack, win_end]",
                 { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
                 seqArea.x + 4,
@@ -523,8 +546,7 @@ export function createTcpController(state) {
                 0,
                 0
             );
-            addText(
-                textLayer,
+            addDetailText(
                 "dashed: max_sent",
                 { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
                 seqArea.x + 4,
@@ -620,8 +642,7 @@ export function createTcpController(state) {
         ];
         let y = textArea.y;
         for (const line of lines) {
-            addText(
-                textLayer,
+            addDetailText(
                 line,
                 { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.75)" },
                 textArea.x,
@@ -635,12 +656,10 @@ export function createTcpController(state) {
 
     function drawWindowBar(surface, area, windowPoints, pts, mss) {
         const g = surface.graphics;
-        const textLayer = surface.textLayer;
         const curWin = pickPointAt(windowPoints, state.curTime);
         const curP = pickPointAt(pts, state.curTime);
         if (!curWin || !curP || curP.cwnd == null) {
-            addText(
-                textLayer,
+            addDetailText(
                 "Send window：无可用数据",
                 { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.6)" },
                 area.x,
@@ -690,8 +709,7 @@ export function createTcpController(state) {
         )}M i(inflight)=${inflightMss.toFixed(0)}M a(avail)=${availMss.toFixed(0)}M f(fill)=${Math.round(
             fillPct * 100
         )}%`;
-        addText(
-            textLayer,
+        addDetailText(
             explainLine,
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             area.x,
@@ -715,8 +733,7 @@ export function createTcpController(state) {
             setLineStyle(g, 1, "rgba(15,23,42,0.18)");
             g.moveTo(x, y - 8);
             g.lineTo(x, y + 8);
-            addText(
-                textLayer,
+            addDetailText(
                 fmtBytes(s),
                 { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
                 x,
@@ -731,8 +748,7 @@ export function createTcpController(state) {
             setLineStyle(g, 1, "rgba(15,23,42,0.18)");
             g.moveTo(x, y - 8);
             g.lineTo(x, y + 8);
-            addText(
-                textLayer,
+            addDetailText(
                 fmtBytes(right),
                 { fontFamily: fontMono, fontSize: 10, fill: "rgba(15,23,42,0.55)" },
                 x,
@@ -796,8 +812,7 @@ export function createTcpController(state) {
             ySentLabel = yEndLabel === labelBaseY ? labelBaseY - labelStep : labelBaseY - labelStep * 2;
         }
 
-        addText(
-            textLayer,
+        addDetailText(
             "ACK",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             xAck,
@@ -805,8 +820,7 @@ export function createTcpController(state) {
             0.5,
             1
         );
-        addText(
-            textLayer,
+        addDetailText(
             "SENT",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             xSent,
@@ -814,8 +828,7 @@ export function createTcpController(state) {
             0.5,
             1
         );
-        addText(
-            textLayer,
+        addDetailText(
             "END",
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.75)" },
             xEnd,
@@ -827,7 +840,6 @@ export function createTcpController(state) {
 
     function drawStateMachine(surface, area, stateStr) {
         const g = surface.graphics;
-        const textLayer = surface.textLayer;
         const nodes = ["SS", "CA", "FR", "RTO"];
         const gap = 10;
         const w = Math.min(70, (area.w - gap) / 2);
@@ -858,8 +870,7 @@ export function createTcpController(state) {
             setLineStyle(g, 1.5, active ? "rgba(14,116,144,0.85)" : "rgba(15,23,42,0.25)");
             drawRoundedRect(g, p.x, p.y, w, h, 6);
             g.endFill();
-            addText(
-                textLayer,
+            addDetailText(
                 k,
                 { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.8)" },
                 p.x + w / 2,
@@ -870,8 +881,7 @@ export function createTcpController(state) {
         }
 
         const label = stateStr === "DCTCP" ? "DCTCP" : "Reno 状态机";
-        addText(
-            textLayer,
+        addDetailText(
             label,
             { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
             area.x,
@@ -941,8 +951,7 @@ export function createTcpController(state) {
         beginFill(g, "rgba(15,23,42,0.55)");
         drawRoundedRect(g, x, y, w, h, 10);
         g.endFill();
-        addText(
-            detailSurface.textLayer,
+        addDetailText(
             text,
             { fontFamily: fontMono, fontSize: 12, fill: "rgba(255,255,255,0.95)" },
             x + 10,
@@ -1032,6 +1041,7 @@ export function createTcpController(state) {
         if (!el) {
             destroySurface(detailSurface);
             detailSurface = null;
+            resetDetailLabels();
             return;
         }
         destroySurface(detailSurface);
