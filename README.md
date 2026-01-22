@@ -33,7 +33,13 @@ cargo run --bin dumbbell_tcp -- \
   --viz-json out.json 
 ```
 
-可视化：
-- 打开 `viz/index.html`，加载 `out.json`
+## 可视化：
+
+```
+npm install 
+
+npm run dev 
+```
+- 打开 `http://localhost:5173/`，加载 `out.json`
 
 其他入口：`dumbbell` / `dumbbell_tcp` / `dumbbell_dctcp` / `fat_tree` / `trace_single_packet`（使用 `--help` 查看参数）。
