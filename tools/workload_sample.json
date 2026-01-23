@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "topology": {
+    "kind": "dumbbell",
+    "host_link_gbps": 100,
+    "bottleneck_gbps": 10,
+    "link_latency_us": 2
+  },
+  "defaults": {
+    "protocol": "tcp",
+    "routing": "per_flow",
+    "bytes_per_element": 4
+  },
+  "hosts": [
+    { "id": 0, "name": "rank0", "topo_index": 0, "gpu": { "model": "NVIDIA_A100" } },
+    { "id": 1, "name": "rank1", "topo_index": 1, "gpu": { "model": "NVIDIA_A100" } }
+  ],
+  "steps": [
+    { "id": 0, "label": "step0", "hosts": [0, 1], "compute_ms": 2.5, "comm_bytes": 1048576 },
+    { "id": 1, "label": "step1", "hosts": [0, 1], "compute_ms": 1.5, "comm_bytes": 2097152 }
+  ]
+}

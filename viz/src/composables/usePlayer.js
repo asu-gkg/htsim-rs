@@ -43,6 +43,7 @@ export function usePlayer() {
         { kind: "tcp_recv_ack", label: "TCP 接收 ACK", group: "base" },
         { kind: "tcp_rto", label: "TCP RTO", group: "base" },
         { kind: "arrive_node", label: "到达节点", group: "base" },
+        { kind: "gpu_busy", label: "GPU 计算", group: "compute" },
     ];
     const baseKinds = eventTypeCatalog.filter((item) => item.group === "base").map((item) => item.kind);
     const baseKindsNoAll = baseKinds.filter((kind) => kind !== "base_all");
@@ -361,6 +362,14 @@ export function usePlayer() {
             if (ev.ecn_frac != null) extra.push(`ECN比例=${Number(ev.ecn_frac).toFixed(3)}`);
             const suffix = extra.length ? `（${extra.join("，")}）` : "";
             note = reasonText ? `依据：${reasonText}${suffix}` : "";
+        } else if (kind === "gpu_busy") {
+            title = "GPU 计算";
+            category = "compute";
+            const node = nodeLabel(ev.node);
+            const dur = ev.duration_ns != null ? `时长=${fmtMs(ev.duration_ns)}` : null;
+            const gpu = ev.gpu ? `GPU=${ev.gpu}` : null;
+            const step = ev.step_id != null ? `step=${ev.step_id}` : null;
+            detail = parts([node, gpu, step, dur, ev.label ? `标签=${ev.label}` : null]);
         } else if (kind.startsWith("tcp_") || kind.startsWith("dctcp_")) {
             title = "TCP 状态更新";
             category = "tcp";

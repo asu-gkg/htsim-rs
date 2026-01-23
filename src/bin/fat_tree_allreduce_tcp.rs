@@ -238,6 +238,7 @@ fn main() {
             },
             start_flow_id: 1,
             transport: Box::new(transport),
+            done_cb: None,
         },
     );
     sim.run(&mut world);

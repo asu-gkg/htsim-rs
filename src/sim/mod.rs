@@ -8,6 +8,7 @@ mod event;
 mod world;
 mod scheduled_event;
 mod simulator;
+mod workload;
 
 // 重新导出公共接口
 pub use time::SimTime;
@@ -15,3 +16,7 @@ pub use event::Event;
 pub use world::World;
 pub use scheduled_event::ScheduledEvent;
 pub use simulator::Simulator;
+pub use workload::{
+    GpuSpec, HostSpec, RoutingMode, StepSpec, TopologySpec, TransportProtocol, WorkloadDefaults,
+    WorkloadMeta, WorkloadSpec,
+};

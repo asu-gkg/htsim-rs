@@ -9,6 +9,17 @@ pub enum VizEventKind {
         nodes: Vec<VizNodeInfo>,
         links: Vec<VizLinkInfo>,
     },
+    /// GPU 计算（用于训练 step 的本地计算段）
+    GpuBusy {
+        node: usize,
+        duration_ns: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gpu: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        step_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
     /// 节点开始处理一个到达的数据包（可用于区分 host/switch）
     NodeRx {
         node: usize,

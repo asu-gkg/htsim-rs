@@ -15,6 +15,8 @@ pub enum RoutingMode {
 
 /// Callback invoked when a flow finishes.
 pub type RingDoneCallback = Box<dyn Fn(SimTime, &mut Simulator) + Send>;
+/// Callback invoked when a ring allreduce finishes.
+pub type RingAllreduceDoneCallback = Box<dyn Fn(SimTime, &mut Simulator) + Send>;
 
 /// Transport adapter used by ring collectives.
 pub trait RingTransport: Send + 'static {
@@ -45,6 +47,7 @@ struct State {
     done_at: Option<SimTime>,
     flow_start_at: HashMap<u64, SimTime>,
     flow_fct_ns: Vec<u64>,
+    done_cb: Option<RingAllreduceDoneCallback>,
 }
 
 impl State {
@@ -89,10 +92,20 @@ impl Event for StartStep {
                     st.start_at = Some(sim.now());
                 }
                 st.done_at = Some(sim.now());
+                let done_cb = st.done_cb.take();
+                drop(st);
+                if let Some(cb) = done_cb {
+                    cb(sim.now(), sim);
+                }
                 return;
             }
             if st.step >= total_steps {
                 st.done_at = Some(sim.now());
+                let done_cb = st.done_cb.take();
+                drop(st);
+                if let Some(cb) = done_cb {
+                    cb(sim.now(), sim);
+                }
                 return;
             }
             if st.start_at.is_none() {
@@ -158,6 +171,7 @@ impl Event for FlowDone {
             done_at,
         } = *self;
         let mut start_next = false;
+        let mut done_cb: Option<RingAllreduceDoneCallback> = None;
         {
             let mut st = state.lock().expect("ring allreduce state lock");
             if st.inflight == 0 || st.done_at.is_some() {
@@ -175,10 +189,15 @@ impl Event for FlowDone {
                 st.step = st.step.saturating_add(1);
                 if st.step >= st.total_steps() {
                     st.done_at = Some(sim.now());
+                    done_cb = st.done_cb.take();
                 } else {
                     start_next = true;
                 }
             }
+        }
+
+        if let Some(cb) = done_cb {
+            cb(sim.now(), sim);
         }
 
         if start_next {
@@ -201,6 +220,7 @@ pub struct RingAllreduceConfig {
     pub routing: RoutingMode,
     pub start_flow_id: u64,
     pub transport: Box<dyn RingTransport>,
+    pub done_cb: Option<RingAllreduceDoneCallback>,
 }
 
 /// Runtime stats collected by a ring allreduce.
@@ -236,6 +256,14 @@ pub fn start_ring_allreduce(
     sim: &mut Simulator,
     cfg: RingAllreduceConfig,
 ) -> RingAllreduceHandle {
+    start_ring_allreduce_at(sim, cfg, SimTime::ZERO)
+}
+
+pub fn start_ring_allreduce_at(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+    start_at: SimTime,
+) -> RingAllreduceHandle {
     let state = Arc::new(Mutex::new(State {
         ranks: cfg.ranks,
         hosts: cfg.hosts,
@@ -249,12 +277,13 @@ pub fn start_ring_allreduce(
         done_at: None,
         flow_start_at: HashMap::new(),
         flow_fct_ns: Vec::new(),
+        done_cb: cfg.done_cb,
     }));
 
     let transport = Arc::new(Mutex::new(cfg.transport));
 
     sim.schedule(
-        SimTime::ZERO,
+        start_at,
         StartStep {
             state: Arc::clone(&state),
             transport: Arc::clone(&transport),

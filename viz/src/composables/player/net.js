@@ -195,6 +195,13 @@ export function createNetRenderer(state) {
             state.nodeStats.set(Number(ev.node), ns);
             return true;
         }
+        if (kind === "gpu_busy") {
+            const dur = Number(ev.duration_ns ?? 0);
+            const until = Number(ev.t_ns ?? 0) + dur;
+            state.nodeHighlight.set(Number(ev.node), { node: Number(ev.node), until });
+            state.lastEventsText.push(`${head} node=${ev.node} gpu_busy ${dur}ns`);
+            return true;
+        }
         if (kind === "node_forward") {
             state.lastEventsText.push(`${head} node=${ev.node} -> next=${ev.next} pkt=${ev.pkt_id}`);
             const ns = state.nodeStats.get(Number(ev.node)) || {};

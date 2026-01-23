@@ -98,6 +98,7 @@ const filterGroups = computed(() => {
         { id: "base", title: "基础事件" },
         { id: "cwnd", title: "窗口调整（总）" },
         { id: "cwnd_reason", title: "窗口调整原因" },
+        { id: "compute", title: "GPU 计算" },
     ];
     const groups = new Map(order.map((g) => [g.id, { ...g, items: [] }]));
     for (const item of catalog) {
