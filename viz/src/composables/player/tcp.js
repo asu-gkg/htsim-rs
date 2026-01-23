@@ -548,15 +548,6 @@ export function createTcpController(state) {
             0
         );
 
-        for (const a of ackEvents) {
-            const x = xOf(a.t);
-            const y = yOf(a.ack);
-            setLineStyle(g, 1, "rgba(0,0,0,0.25)");
-            beginFill(g, a.ecn ? "rgba(239,68,68,0.65)" : "rgba(34,197,94,0.65)");
-            g.drawPolygon([x, y - 5, x + 5, y + 5, x - 5, y + 5]);
-            g.endFill();
-        }
-
         const normalSeq = [];
         const retransSeq = [];
         for (const s of seqEvents) {
@@ -584,6 +575,15 @@ export function createTcpController(state) {
             setLineStyle(g, 3, "#f59e0b");
             g.moveTo(x, y1);
             g.lineTo(x, y2);
+        }
+
+        for (const a of ackEvents) {
+            const x = xOf(a.t);
+            const y = yOf(a.ack);
+            setLineStyle(g, 0, "transparent");
+            beginFill(g, a.ecn ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)");
+            g.drawPolygon([x, y - 5, x + 5, y + 5, x - 5, y + 5]);
+            g.endFill();
         }
 
         for (const r of rtoEvents) {

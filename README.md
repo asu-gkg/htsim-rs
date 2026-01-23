@@ -36,9 +36,9 @@ cargo run --bin dumbbell_tcp -- \
 ## 可视化：
 
 ```
-npm install 
-
-npm --prefix viz run dev
+cd viz
+npm install
+npm run dev
 ```
 - 打开 `http://localhost:5173/`，加载 `out.json`
 
