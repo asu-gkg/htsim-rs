@@ -90,10 +90,8 @@ function buildTcpTimeline(arr) {
     const seqEvents = [];
     const ackEvents = [];
     const rtoEvents = [];
-    const ackLinks = [];
     const windowPoints = [];
     const rttSeries = [];
-    const inflight = new Map();
     const sentEnds = new Map();
     const retransEnds = new Set();
     const ackedEnds = new Set();
@@ -122,10 +120,9 @@ function buildTcpTimeline(arr) {
             const end = seq + len;
             // 新格式：Rust 会在真正重传时发出 tcp_send_data 且带 retrans=true
             // 旧格式：没有该字段，只能用“同一 end 在未被 ACK 前再次发送”来推断
-            const retrans = e.retrans === true || (sentEnds.has(end) && end > lastAck);
+            const retrans = Boolean(e.retrans) || (sentEnds.has(end) && end > lastAck);
             if (retrans) retransEnds.add(end);
             sentEnds.set(end, t);
-            inflight.set(seq, len);
             seqEvents.push({ t, seq, len, end, retrans });
             if (end > maxSent) maxSent = end;
             recWindow(t);
@@ -157,21 +154,10 @@ function buildTcpTimeline(arr) {
                             retrans,
                         });
                     }
-                    ackLinks.push({
-                        send_t: match.sentAt,
-                        send_seq: match.end,
-                        ack_t: t,
-                        ack_seq: match.end,
-                        retrans,
-                        ecn,
-                    });
                     ackedEnds.add(match.end);
                     retransEnds.delete(match.end);
                 }
                 lastAck = ack;
-                for (const [seq, len] of Array.from(inflight.entries())) {
-                    if (seq + len <= ack) inflight.delete(seq);
-                }
                 for (const [end] of Array.from(sentEnds.entries())) {
                     if (end <= ack) sentEnds.delete(end);
                 }
@@ -184,7 +170,7 @@ function buildTcpTimeline(arr) {
         }
     }
 
-    return { seqEvents, ackEvents, rtoEvents, ackLinks, windowPoints, rttSeries };
+    return { seqEvents, ackEvents, rtoEvents, windowPoints, rttSeries };
 }
 
 function pickAckMatch(ack, sentEnds, ackedEnds) {

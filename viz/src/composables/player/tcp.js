@@ -73,7 +73,7 @@ export function createTcpController(state) {
         // TCP 事件计数（随时间推进）
         if (kind === "tcp_send_data") {
             state.tcpStats.send_data += 1;
-            if (ev.retrans === true) {
+            if (Boolean(ev.retrans)) {
                 state.tcpStats.retrans += 1;
             }
         }
@@ -466,7 +466,6 @@ export function createTcpController(state) {
         const seqEvents = ser.seqEvents || [];
         const ackEvents = ser.ackEvents || [];
         const rtoEvents = ser.rtoEvents || [];
-        const ackLinks = ser.ackLinks || [];
         const windowPoints = ser.windowPoints || [];
         const rttSeries = ser.rttSeries || [];
         const pts = ser.points || [];
@@ -549,49 +548,40 @@ export function createTcpController(state) {
             0
         );
 
-        if (curWin && curP?.cwnd != null) {
-            const lastAck = Number(curWin.lastAck ?? 0);
-            const maxSent = Number(curWin.maxSent ?? lastAck);
-            const winEnd = lastAck + Number(curP.cwnd ?? 0);
-            const y1 = yOf(lastAck);
-            const y2 = yOf(winEnd);
-            const top = Math.min(y1, y2);
-            const hh = Math.abs(y1 - y2);
-            beginFill(g, "rgba(14,165,233,0.06)");
-            g.drawRect(seqArea.x, top, seqArea.w, hh);
+        for (const a of ackEvents) {
+            const x = xOf(a.t);
+            const y = yOf(a.ack);
+            setLineStyle(g, 1, "rgba(0,0,0,0.25)");
+            beginFill(g, a.ecn ? "rgba(239,68,68,0.65)" : "rgba(34,197,94,0.65)");
+            g.drawPolygon([x, y - 5, x + 5, y + 5, x - 5, y + 5]);
             g.endFill();
-            const ys = yOf(maxSent);
-            setLineStyle(g, 1, "rgba(14,165,233,0.35)");
-            drawDashedLine(g, seqArea.x, ys, seqArea.x + seqArea.w, ys, 4, 4);
-            addDetailText(
-                "window band: [last_ack, win_end]",
-                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
-                seqArea.x + 4,
-                seqArea.y + 4,
-                0,
-                0
-            );
-            addDetailText(
-                "dashed: max_sent",
-                { fontFamily: fontMono, fontSize: 11, fill: "rgba(15,23,42,0.65)" },
-                seqArea.x + 4,
-                seqArea.y + 18,
-                0,
-                0
-            );
         }
 
-        setLineStyle(g, 1, "rgba(100,116,139,0.55)");
-        for (const l of ackLinks) {
-            const y = yOf(l.send_seq);
-            drawDashedLine(g, xOf(l.send_t), y, xOf(l.ack_t), y, 4, 4);
-        }
-
+        const normalSeq = [];
+        const retransSeq = [];
         for (const s of seqEvents) {
+            if (s.retrans) {
+                retransSeq.push(s);
+            } else {
+                normalSeq.push(s);
+            }
+        }
+        for (const s of normalSeq) {
             const x = xOf(s.t);
             const y1 = yOf(s.seq);
             const y2 = yOf(s.end);
-            setLineStyle(g, s.retrans ? 3 : 2, s.retrans ? "#f59e0b" : "#0ea5e9");
+            setLineStyle(g, 2, "#0ea5e9");
+            g.moveTo(x, y1);
+            g.lineTo(x, y2);
+        }
+        for (const s of retransSeq) {
+            const x = xOf(s.t);
+            const y1 = yOf(s.seq);
+            const y2 = yOf(s.end);
+            setLineStyle(g, 6, "rgba(245,158,11,0.18)");
+            g.moveTo(x, y1);
+            g.lineTo(x, y2);
+            setLineStyle(g, 3, "#f59e0b");
             g.moveTo(x, y1);
             g.lineTo(x, y2);
         }
@@ -604,22 +594,6 @@ export function createTcpController(state) {
             g.lineTo(x + 5, y + 5);
             g.moveTo(x + 5, y - 5);
             g.lineTo(x - 5, y + 5);
-        }
-
-        let lastAckSeen = -Infinity;
-        for (const a of ackEvents) {
-            const x = xOf(a.t);
-            const y = yOf(a.ack);
-            const isDup = a.ack <= lastAckSeen;
-            if (a.ack > lastAckSeen) lastAckSeen = a.ack;
-            setLineStyle(g, 1, "rgba(0,0,0,0.25)");
-            beginFill(g, a.ecn ? "#ef4444" : "#22c55e");
-            if (isDup) {
-                g.drawRect(x - 3, y - 3, 6, 6);
-            } else {
-                g.drawPolygon([x, y - 5, x + 5, y + 5, x - 5, y + 5]);
-            }
-            g.endFill();
         }
 
         const xNow = xOf(state.curTime);

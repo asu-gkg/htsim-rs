@@ -411,7 +411,7 @@ export function usePlayer() {
 
         const dropCount = visibleEvents.filter((e) => e.kind === "drop").length;
         const rtoCount = visibleEvents.filter((e) => e.kind === "tcp_rto").length;
-        const retransCount = visibleEvents.filter((e) => e.kind === "tcp_send_data" && e.retrans === true).length;
+        const retransCount = visibleEvents.filter((e) => e.kind === "tcp_send_data" && Boolean(e.retrans)).length;
         const deliveredCount = visibleEvents.filter((e) => e.kind === "delivered").length;
         const nodeRxCount = visibleEvents.filter((e) => e.kind === "node_rx").length;
 
