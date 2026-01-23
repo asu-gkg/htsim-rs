@@ -1,4 +1,4 @@
-import { Application, Text } from "pixi.js";
+import { Application } from "pixi.js";
 
 function getCanvasCssSize(canvas) {
     if (!canvas) return { width: 0, height: 0 };
@@ -94,23 +94,6 @@ export function drawRoundedRect(graphics, x, y, w, h, r) {
     } else {
         graphics.drawRoundedRect(x, y, w, h, r);
     }
-}
-
-export function clearTextLayer(container) {
-    const children = container.removeChildren();
-    for (const child of children) {
-        child.destroy();
-    }
-}
-
-export function addText(container, text, style, x, y, anchorX = 0, anchorY = 0, rotation = 0) {
-    const label = new Text(text, style);
-    label.x = x;
-    label.y = y;
-    label.anchor.set(anchorX, anchorY);
-    if (rotation) label.rotation = rotation;
-    container.addChild(label);
-    return label;
 }
 
 export function drawDashedLine(graphics, x1, y1, x2, y2, dash = 6, gap = 4) {

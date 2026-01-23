@@ -4,13 +4,13 @@
             <div class="canvas-title">TCP 机制拆解</div>
             <div class="canvas-meta">Sequence-Time / Window / RTT-RTO / 状态机</div>
         </div>
-        <div class="tcp-detail-wrap">
+        <div class="canvas-wrap">
             <canvas ref="canvas" class="tcp-detail" width="1100" height="800"></canvas>
-            <div class="tcp-detail-overlay" aria-hidden="true">
+            <div class="canvas-overlay" aria-hidden="true">
                 <span
                     v-for="(label, idx) in state.tcpDetailLabels"
                     :key="`tcp-detail-label-${idx}`"
-                    class="tcp-detail-label"
+                    class="canvas-label"
                     :style="labelStyle(label)"
                 >
                     {{ label.text }}
@@ -42,7 +42,7 @@ const labelStyle = (label) => {
     const anchorY = Number(label.anchorY ?? 0);
     const translate = `translate(${-anchorX * 100}%, ${-anchorY * 100}%)`;
     const rotate = label.rotation ? ` rotate(${label.rotation}rad)` : "";
-    return {
+    const style = {
         left: `${label.x}px`,
         top: `${label.y}px`,
         color: label.color,
@@ -51,6 +51,12 @@ const labelStyle = (label) => {
         fontWeight: label.fontWeight || "normal",
         transform: `${translate}${rotate}`,
     };
+    if (label.background) style.background = label.background;
+    if (label.borderColor) style.border = `${label.borderWidth || 1}px solid ${label.borderColor}`;
+    if (label.borderRadius) style.borderRadius = `${label.borderRadius}px`;
+    if (label.padding) style.padding = label.padding;
+    if (label.boxShadow) style.boxShadow = label.boxShadow;
+    return style;
 };
 
 onMounted(() => {

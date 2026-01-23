@@ -4,7 +4,14 @@
             <div class="canvas-title">TCP / DCTCP 时序</div>
             <div class="canvas-meta">4 子图（点击放大）：cwnd / ssthresh / inflight / 对比</div>
         </div>
-        <canvas ref="canvas" class="tcp" width="1100" height="320"></canvas>
+        <div class="canvas-wrap">
+            <canvas ref="canvas" class="tcp" width="1100" height="320"></canvas>
+            <div class="canvas-overlay" aria-hidden="true">
+                <span v-for="(label, idx) in state.tcpLabels" :key="`tcp-label-${idx}`" class="canvas-label" :style="labelStyle(label)">
+                    {{ label.text }}
+                </span>
+            </div>
+        </div>
     </div>
     <!-- 放大模态框 -->
     <Teleport to="body">
@@ -14,21 +21,62 @@
                     <span class="tcp-modal-title">TCP / DCTCP 时序（放大视图）</span>
                     <button class="tcp-modal-close" @click="closeModal">✕</button>
                 </div>
-                <canvas ref="modalCanvas" class="tcp-modal-canvas" width="1600" height="800"></canvas>
+                <div class="canvas-wrap tcp-modal-wrap">
+                    <canvas ref="modalCanvas" class="tcp-modal-canvas" width="1600" height="800"></canvas>
+                    <div class="canvas-overlay" aria-hidden="true">
+                        <span
+                            v-for="(label, idx) in state.tcpModalLabels"
+                            :key="`tcp-modal-label-${idx}`"
+                            class="canvas-label"
+                            :style="labelStyle(label)"
+                        >
+                            {{ label.text }}
+                        </span>
+                    </div>
+                </div>
             </div>
         </div>
     </Teleport>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref } from "vue";
 
 defineProps({});
+
+const player = inject("player");
+if (!player) {
+    throw new Error("player store not provided");
+}
+
+const state = player.state;
 
 const emit = defineEmits(["ready", "modal-ready", "modal-close"]);
 const canvas = ref(null);
 const modalCanvas = ref(null);
 const modalVisible = ref(false);
+
+const labelStyle = (label) => {
+    const anchorX = Number(label.anchorX ?? 0);
+    const anchorY = Number(label.anchorY ?? 0);
+    const translate = `translate(${-anchorX * 100}%, ${-anchorY * 100}%)`;
+    const rotate = label.rotation ? ` rotate(${label.rotation}rad)` : "";
+    const style = {
+        left: `${label.x}px`,
+        top: `${label.y}px`,
+        color: label.color,
+        fontFamily: label.fontFamily,
+        fontSize: `${label.fontSize}px`,
+        fontWeight: label.fontWeight || "normal",
+        transform: `${translate}${rotate}`,
+    };
+    if (label.background) style.background = label.background;
+    if (label.borderColor) style.border = `${label.borderWidth || 1}px solid ${label.borderColor}`;
+    if (label.borderRadius) style.borderRadius = `${label.borderRadius}px`;
+    if (label.padding) style.padding = label.padding;
+    if (label.boxShadow) style.boxShadow = label.boxShadow;
+    return style;
+};
 
 function openModal() {
     modalVisible.value = true;

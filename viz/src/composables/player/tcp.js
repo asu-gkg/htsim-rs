@@ -1,10 +1,8 @@
-import { Container, Graphics } from "pixi.js";
+import { Graphics } from "pixi.js";
 import { fmtBytes, fmtMs } from "../../utils/format";
 import { buildTcpSeries, pickAutoConn, pickPointAt } from "../../utils/tcp";
 import {
-    addText,
     beginFill,
-    clearTextLayer,
     createPixiApp,
     destroyPixiApp,
     drawDashedLine,
@@ -24,9 +22,8 @@ export function createTcpController(state) {
     function createSurface(canvas) {
         const app = createPixiApp(canvas);
         const graphics = new Graphics();
-        const textLayer = new Container();
-        app.stage.addChild(graphics, textLayer);
-        return { app, graphics, textLayer, canvas };
+        app.stage.addChild(graphics);
+        return { app, graphics, canvas };
     }
 
     function destroySurface(surface) {
@@ -37,7 +34,6 @@ export function createTcpController(state) {
     function clearSurface(surface) {
         if (!surface) return;
         surface.graphics.clear();
-        clearTextLayer(surface.textLayer);
     }
 
     function ensureSurfaceSize(surface) {
@@ -110,7 +106,11 @@ export function createTcpController(state) {
     }
 
     function redrawTcp() {
-        if (!mainSurface) return;
+        if (!mainSurface) {
+            resetTcpLabels("main");
+            return;
+        }
+        resetTcpLabels("main");
         const { width: canvasW, height: canvasH } = ensureSurfaceSize(mainSurface);
         clearSurface(mainSurface);
 
@@ -142,13 +142,12 @@ export function createTcpController(state) {
         const curP = pickPointAt(pts, state.curTime);
 
         for (const area of areas) {
-            drawTcpSubChartOnSurface(mainSurface, pts, mss, area, curP, true);
+            drawTcpSubChartOnSurface(mainSurface, pts, mss, area, curP, true, "main");
         }
     }
 
-    function drawTcpSubChartOnSurface(surface, pts, mss, area, curP, isSmall = false) {
+    function drawTcpSubChartOnSurface(surface, pts, mss, area, curP, isSmall = false, labelTarget = "main") {
         const g = surface.graphics;
-        const textLayer = surface.textLayer;
         const { x: ax, y: ay, w: aw, h: ah, title, field, color, fill } = area;
         // 放大版用更大的 padding
         const pad = isSmall ? { l: 50, r: 8, t: 18, b: 6 } : { l: 80, r: 20, t: 40, b: 30 };
@@ -193,8 +192,8 @@ export function createTcpController(state) {
             const y = chartY + (1 - k / gridLines) * chartH;
             g.moveTo(chartX, y);
             g.lineTo(chartX + chartW, y);
-            addText(
-                textLayer,
+            addTcpLabel(
+                labelTarget,
                 `${pk}`,
                 { fontFamily: fontMono, fontSize, fill: "rgba(15,23,42,0.6)" },
                 chartX - 6,
@@ -205,8 +204,8 @@ export function createTcpController(state) {
         }
 
         // 标题
-        addText(
-            textLayer,
+        addTcpLabel(
+            labelTarget,
             title,
             { fontFamily: fontMono, fontSize: isSmall ? 12 : 18, fill: "rgba(15,23,42,0.8)" },
             ax + (isSmall ? 6 : 16),
@@ -217,8 +216,8 @@ export function createTcpController(state) {
 
         // Y 轴标签
         if (!isSmall) {
-            addText(
-                textLayer,
+            addTcpLabel(
+                labelTarget,
                 "pkts",
                 { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.5)" },
                 ax + 16,
@@ -267,8 +266,8 @@ export function createTcpController(state) {
                     g.moveTo(legendX + 10, y);
                     g.lineTo(legendX + 40, y);
                 }
-                addText(
-                    textLayer,
+                addTcpLabel(
+                    labelTarget,
                     item.label,
                     { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.8)" },
                     legendX + 50,
@@ -293,8 +292,8 @@ export function createTcpController(state) {
                     field === "all"
                         ? `cwnd:${(curP.cwnd / mss).toFixed(1)}  ssthresh:${(curP.ssthresh / mss).toFixed(1)}  inflight:${(curP.inflight / mss).toFixed(1)} pkts`
                         : `${(val / mss).toFixed(1)} pkts`;
-                addText(
-                    textLayer,
+                addTcpLabel(
+                    labelTarget,
                     valText,
                     { fontFamily: fontMono, fontSize: isSmall ? 11 : 14, fill: "rgba(15,23,42,0.7)" },
                     ax + aw - (isSmall ? 6 : 16),
@@ -306,8 +305,8 @@ export function createTcpController(state) {
 
             // 放大版显示时间
             if (!isSmall) {
-                addText(
-                    textLayer,
+                addTcpLabel(
+                    labelTarget,
                     `t=${fmtMs(curP.t)}`,
                     { fontFamily: fontMono, fontSize: 12, fill: "rgba(245,158,11,0.9)" },
                     xNow,
@@ -374,8 +373,8 @@ export function createTcpController(state) {
     }
 
     function drawTcpBoxAt(surface, x, y, text) {
-        addText(
-            surface.textLayer,
+        addTcpLabel(
+            "main",
             text,
             { fontFamily: fontMono, fontSize: 12, fill: "rgba(15,23,42,0.6)" },
             x,
@@ -396,6 +395,32 @@ export function createTcpController(state) {
     function addDetailText(text, style, x, y, anchorX = 0, anchorY = 0, rotation = 0) {
         if (!state.tcpDetailLabels) state.tcpDetailLabels = [];
         state.tcpDetailLabels.push({
+            text,
+            x,
+            y,
+            anchorX,
+            anchorY,
+            rotation,
+            fontFamily: style?.fontFamily || fontMono,
+            fontSize: style?.fontSize || 11,
+            color: style?.fill || "rgba(15,23,42,0.75)",
+            fontWeight: style?.fontWeight || "normal",
+        });
+    }
+
+    function resetTcpLabels(target) {
+        const key = target === "modal" ? "tcpModalLabels" : "tcpLabels";
+        if (!state[key]) {
+            state[key] = [];
+            return;
+        }
+        state[key].length = 0;
+    }
+
+    function addTcpLabel(target, text, style, x, y, anchorX = 0, anchorY = 0, rotation = 0) {
+        const key = target === "modal" ? "tcpModalLabels" : "tcpLabels";
+        if (!state[key]) state[key] = [];
+        state[key].push({
             text,
             x,
             y,
@@ -968,6 +993,7 @@ export function createTcpController(state) {
             }
             destroySurface(mainSurface);
             mainSurface = null;
+            resetTcpLabels("main");
             return;
         }
         if (mainSurface?.canvas) {
@@ -994,6 +1020,7 @@ export function createTcpController(state) {
         if (!el) {
             destroySurface(modalSurface);
             modalSurface = null;
+            resetTcpLabels("modal");
             return;
         }
         destroySurface(modalSurface);
@@ -1004,10 +1031,15 @@ export function createTcpController(state) {
     function onTcpModalClose() {
         destroySurface(modalSurface);
         modalSurface = null;
+        resetTcpLabels("modal");
     }
 
     function redrawTcpModal() {
-        if (!modalSurface) return;
+        if (!modalSurface) {
+            resetTcpLabels("modal");
+            return;
+        }
+        resetTcpLabels("modal");
         const { width: canvasW, height: canvasH } = ensureSurfaceSize(modalSurface);
         clearSurface(modalSurface);
 
@@ -1033,7 +1065,7 @@ export function createTcpController(state) {
         ];
 
         for (const area of areas) {
-            drawTcpSubChartOnSurface(modalSurface, pts, mss, area, curP, false);
+            drawTcpSubChartOnSurface(modalSurface, pts, mss, area, curP, false, "modal");
         }
     }
 

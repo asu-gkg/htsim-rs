@@ -311,18 +311,21 @@ canvas.tcp-detail {
     height: clamp(440px, 58vh, 820px);
 }
 
-.tcp-detail-wrap {
+.canvas-wrap {
     position: relative;
+    display: inline-block;
+    width: 100%;
 }
 
-.tcp-detail-overlay {
+.canvas-overlay {
     position: absolute;
     inset: 0;
     pointer-events: none;
 }
 
-.tcp-detail-label {
+.canvas-label {
     position: absolute;
+    display: inline-block;
     white-space: nowrap;
     line-height: 1.1;
     -webkit-font-smoothing: antialiased;

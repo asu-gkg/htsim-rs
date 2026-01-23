@@ -1,4 +1,4 @@
-import { Container, Graphics, Text } from "pixi.js";
+import { Graphics } from "pixi.js";
 import { fmtGbps, fmtMs } from "../../utils/format";
 import {
     buildLinkPairs,
@@ -9,17 +9,7 @@ import {
     layoutFatTree,
     linkKey,
 } from "../../utils/layout";
-import {
-    addText,
-    beginFill,
-    clearTextLayer,
-    createPixiApp,
-    destroyPixiApp,
-    drawDashedLine,
-    drawRoundedRect,
-    resizePixiApp,
-    setLineStyle,
-} from "../../utils/pixi";
+import { beginFill, createPixiApp, destroyPixiApp, drawDashedLine, resizePixiApp, setLineStyle } from "../../utils/pixi";
 
 export function createNetRenderer(state) {
     let app = null;
@@ -27,8 +17,35 @@ export function createNetRenderer(state) {
     let linkLayer = null;
     let nodeLayer = null;
     let packetLayer = null;
-    let linkLabelLayer = null;
-    let nodeLabelLayer = null;
+    function resetNetLabels() {
+        if (!state.netLabels) {
+            state.netLabels = [];
+            return;
+        }
+        state.netLabels.length = 0;
+    }
+
+    function addNetLabel(text, style, x, y, anchorX = 0, anchorY = 0, rotation = 0) {
+        if (!state.netLabels) state.netLabels = [];
+        state.netLabels.push({
+            text,
+            x,
+            y,
+            anchorX,
+            anchorY,
+            rotation,
+            fontFamily: style?.fontFamily || "JetBrains Mono, monospace",
+            fontSize: style?.fontSize || 11,
+            color: style?.fill || "#0f172a",
+            fontWeight: style?.fontWeight || "normal",
+            background: style?.background || null,
+            borderColor: style?.borderColor || null,
+            borderWidth: style?.borderWidth || 0,
+            borderRadius: style?.borderRadius || 0,
+            padding: style?.padding || null,
+            boxShadow: style?.boxShadow || null,
+        });
+    }
 
     function setCanvas(el) {
         if (!el) {
@@ -38,8 +55,7 @@ export function createNetRenderer(state) {
             linkLayer = null;
             nodeLayer = null;
             packetLayer = null;
-            linkLabelLayer = null;
-            nodeLabelLayer = null;
+            resetNetLabels();
             return;
         }
         destroyPixiApp(app);
@@ -48,9 +64,7 @@ export function createNetRenderer(state) {
         linkLayer = new Graphics();
         nodeLayer = new Graphics();
         packetLayer = new Graphics();
-        linkLabelLayer = new Container();
-        nodeLabelLayer = new Container();
-        app.stage.addChild(linkLayer, linkLabelLayer, nodeLayer, nodeLabelLayer, packetLayer);
+        app.stage.addChild(linkLayer, nodeLayer, packetLayer);
     }
 
     function ensureCanvasSize() {
@@ -210,8 +224,7 @@ export function createNetRenderer(state) {
         linkLayer.clear();
         nodeLayer.clear();
         packetLayer.clear();
-        clearTextLayer(linkLabelLayer);
-        clearTextLayer(nodeLabelLayer);
+        resetNetLabels();
         for (const l of state.drawLinks) drawLink(l);
         for (const n of state.nodes) drawNode(n);
         for (const p of state.inflight.values()) drawPacket(p);
@@ -320,26 +333,25 @@ export function createNetRenderer(state) {
         if (!text) return;
 
         const textFill = totalDrop > 0 ? "#dc2626" : isBottleneck ? "#d97706" : "#334155";
-        const textObj = new Text(text, {
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 11,
-            fill: textFill,
-        });
-        textObj.anchor.set(0.5, 0.5);
-        textObj.x = lx;
-        textObj.y = ly;
-
-        const tw = textObj.width + 8;
-        const th = Math.max(14, textObj.height + 4);
-        const bg = new Graphics();
-        const borderColor = totalDrop > 0 ? "rgba(239,68,68,0.7)" : isBottleneck ? "rgba(245,158,11,0.7)" : "rgba(15,23,42,0.25)";
-        setLineStyle(bg, 1, borderColor);
-        beginFill(bg, "rgba(255,255,255,0.9)");
-        drawRoundedRect(bg, lx - tw / 2, ly - th / 2, tw, th, 4);
-        bg.endFill();
-
-        linkLabelLayer.addChild(bg);
-        linkLabelLayer.addChild(textObj);
+        const borderColor =
+            totalDrop > 0 ? "rgba(239,68,68,0.7)" : isBottleneck ? "rgba(245,158,11,0.7)" : "rgba(15,23,42,0.25)";
+        addNetLabel(
+            text,
+            {
+                fontFamily: "JetBrains Mono, monospace",
+                fontSize: 11,
+                fill: textFill,
+                background: "rgba(255,255,255,0.9)",
+                borderColor,
+                borderWidth: 1,
+                borderRadius: 4,
+                padding: "2px 6px",
+            },
+            lx,
+            ly,
+            0.5,
+            0.5
+        );
     }
 
     function drawNode(n) {
@@ -352,8 +364,7 @@ export function createNetRenderer(state) {
         nodeLayer.drawCircle(n.x, n.y, r);
         nodeLayer.endFill();
 
-        addText(
-            nodeLabelLayer,
+        addNetLabel(
             n.name,
             {
                 fontFamily: "JetBrains Mono, monospace",
