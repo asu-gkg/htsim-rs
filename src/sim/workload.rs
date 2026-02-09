@@ -9,7 +9,10 @@ pub struct WorkloadSpec {
     #[serde(default)]
     pub defaults: Option<WorkloadDefaults>,
     pub hosts: Vec<HostSpec>,
+    #[serde(default)]
     pub steps: Vec<StepSpec>,
+    #[serde(default)]
+    pub ranks: Vec<RankSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,4 +101,50 @@ pub struct StepSpec {
     pub comm_bytes: Option<u64>,
     #[serde(default)]
     pub protocol: Option<TransportProtocol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RankSpec {
+    pub id: usize,
+    #[serde(default)]
+    pub steps: Vec<RankStepSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankStepKind {
+    Compute,
+    Collective,
+    Sendrecv,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendRecvDirection {
+    Send,
+    Recv,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RankStepSpec {
+    #[serde(default)]
+    pub id: Option<u64>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub kind: Option<RankStepKind>,
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub compute_ms: Option<f64>,
+    #[serde(default)]
+    pub comm_bytes: Option<u64>,
+    #[serde(default)]
+    pub comm_id: Option<String>,
+    #[serde(default)]
+    pub hosts: Option<Vec<usize>>,
+    #[serde(default)]
+    pub peer: Option<usize>,
+    #[serde(default)]
+    pub direction: Option<SendRecvDirection>,
 }

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workload-gen"
+version = "0.1.0"
+description = "PyTorch-based workload generator for htsim-rs"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "transformers",
+]
+
+[project.scripts]
+workload-gen = "workload_gen.cli:main"
+
+[tool.setuptools]
+packages = ["workload_gen"]

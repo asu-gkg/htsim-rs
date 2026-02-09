@@ -17,6 +17,6 @@ pub use world::World;
 pub use scheduled_event::ScheduledEvent;
 pub use simulator::Simulator;
 pub use workload::{
-    GpuSpec, HostSpec, RoutingMode, StepSpec, TopologySpec, TransportProtocol, WorkloadDefaults,
-    WorkloadMeta, WorkloadSpec,
+    GpuSpec, HostSpec, RankSpec, RankStepKind, RankStepSpec, RoutingMode, SendRecvDirection,
+    StepSpec, TopologySpec, TransportProtocol, WorkloadDefaults, WorkloadMeta, WorkloadSpec,
 };

@@ -3,7 +3,6 @@
         <header class="app-topbar">
             <div class="app-brand">
                 <span class="app-title">htsim-rs</span>
-                <span class="app-subtitle">Visualization & Workload Editor</span>
             </div>
             <div class="app-tabs">
                 <button
@@ -17,10 +16,18 @@
                 <button
                     type="button"
                     class="app-tab"
-                    :class="{ active: mode === 'editor' }"
-                    @click="setMode('editor')"
+                    :class="{ active: mode === 'neusight' }"
+                    @click="setMode('neusight')"
                 >
-                    Workload 编辑器
+                    NeuSight workload生成器
+                </button>
+                <button
+                    type="button"
+                    class="app-tab"
+                    :class="{ active: mode === 'hook' }"
+                    @click="setMode('hook')"
+                >
+                    真实workload生成器
                 </button>
             </div>
         </header>
@@ -47,7 +54,8 @@
             </button>
         </div>
 
-        <WorkloadEditor v-else />
+        <WorkloadEditor v-else-if="mode === 'neusight'" generator="prediction" />
+        <WorkloadEditor v-else generator="hook" />
     </div>
 </template>
 
@@ -65,9 +73,23 @@ const player = usePlayer();
 const tcpCardRef = ref(null);
 const showSidebar = ref(true);
 const showEvent = ref(true);
-const mode = ref(window.location.hash === "#editor" ? "editor" : "playback");
+const mode = ref(
+    window.location.hash === "#editor"
+        ? "neusight"
+        : window.location.hash === "#hook"
+        ? "hook"
+        : "playback"
+);
 const handleHash = () => {
-    mode.value = window.location.hash === "#editor" ? "editor" : "playback";
+    if (window.location.hash === "#editor") {
+        mode.value = "neusight";
+        return;
+    }
+    if (window.location.hash === "#hook") {
+        mode.value = "hook";
+        return;
+    }
+    mode.value = "playback";
 };
 
 provide("player", player);
@@ -78,7 +100,15 @@ function onTcpReady(canvas) {
 
 function setMode(next) {
     mode.value = next;
-    window.location.hash = next === "editor" ? "editor" : "";
+    if (next === "neusight") {
+        window.location.hash = "editor";
+        return;
+    }
+    if (next === "hook") {
+        window.location.hash = "hook";
+        return;
+    }
+    window.location.hash = "";
 }
 
 onMounted(() => {

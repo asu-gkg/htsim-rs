@@ -1,0 +1,105 @@
+{
+  "schema_version": 2,
+  "topology": {
+    "kind": "fat_tree",
+    "k": 4,
+    "link_gbps": 100,
+    "link_latency_us": 2
+  },
+  "hosts": [
+    {
+      "id": 0,
+      "name": "rank0",
+      "topo_index": 0,
+      "gpu": {
+        "model": "NVIDIA_RTX_2080_Ti"
+      }
+    },
+    {
+      "id": 1,
+      "name": "rank1",
+      "topo_index": 1,
+      "gpu": {
+        "model": "NVIDIA_RTX_2080_Ti"
+      }
+    }
+  ],
+  "ranks": [
+    {
+      "id": 0,
+      "steps": [
+        {
+          "id": 0,
+          "kind": "compute",
+          "label": "fwd_mb0",
+          "compute_ms": 37.826758
+        },
+        {
+          "id": 1,
+          "kind": "compute",
+          "label": "bwd_mb0",
+          "compute_ms": 76.371117
+        },
+        {
+          "id": 2,
+          "kind": "collective",
+          "label": "dp_bwd_mb0",
+          "comm_bytes": 412860656,
+          "comm_id": "dp-bwd-pp0-tp0-mb0",
+          "op": "allreduce",
+          "hosts": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "steps": [
+        {
+          "id": 0,
+          "kind": "compute",
+          "label": "fwd_mb0",
+          "compute_ms": 37.826758
+        },
+        {
+          "id": 1,
+          "kind": "compute",
+          "label": "bwd_mb0",
+          "compute_ms": 76.371117
+        },
+        {
+          "id": 2,
+          "kind": "collective",
+          "label": "dp_bwd_mb0",
+          "comm_bytes": 412860656,
+          "comm_id": "dp-bwd-pp0-tp0-mb0",
+          "op": "allreduce",
+          "hosts": [
+            0,
+            1
+          ]
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "source": "/home/asu/Desktop/htsim-rs/NeuSight/scripts/asplos/results/prediction/NVIDIA_RTX_2080_Ti/neusight/bert-train-2-512-dp2.csv",
+    "model": "bert",
+    "num_layers": 12,
+    "device": "NVIDIA_RTX_2080_Ti",
+    "parallel": {
+      "dp": 2,
+      "tp": 1,
+      "pp": 1,
+      "pp_microbatch": 1,
+      "layout": "dp-pp-tp",
+      "pipeline": "1f1b"
+    }
+  },
+  "defaults": {
+    "protocol": "tcp",
+    "bytes_per_element": 4
+  }
+}

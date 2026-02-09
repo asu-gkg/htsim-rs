@@ -39,7 +39,23 @@ cargo run --bin dumbbell_tcp -- \
 cd viz
 npm install
 npm run dev
+
 ```
 - 打开 `http://localhost:5173/`，加载 `out.json`
+
+### NeuSight 预测后端（可选，建议用 uv 虚拟环境）
+```
+uv venv --python 3.10 .venv
+source .venv/bin/activate
+
+# 2080Ti 示例：CUDA 11.8
+uv pip install "numpy<2"
+uv pip install --index-url https://download.pytorch.org/whl/cu118 torch==2.1.0+cu118 torchvision==0.16.0+cu118
+uv pip install -e NeuSight
+
+python tools/neusight_predict_server.py --port 3099
+```
+- 如果遇到 `torchvision::nms does not exist`，通常是 `torch/torchvision` 版本或 CUDA 轮子不匹配，按上面固定版本重装即可。
+- 若提示 `cp313` 不匹配，说明 uv 默认用了 Python 3.13，请改为 `--python 3.10` 或 `3.11`。
 
 其他入口：`dumbbell` / `dumbbell_tcp` / `dumbbell_dctcp` / `fat_tree` / `trace_single_packet`（使用 `--help` 查看参数）。

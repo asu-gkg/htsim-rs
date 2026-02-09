@@ -33,7 +33,6 @@ pub trait RingTransport: Send + 'static {
     );
 }
 
-#[derive(Clone)]
 struct State {
     ranks: usize,
     hosts: Vec<NodeId>,

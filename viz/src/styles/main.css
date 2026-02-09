@@ -150,6 +150,7 @@ body {
     display: grid;
     gap: 18px;
     align-content: start;
+    min-width: 0;
 }
 
 .editor-card {
@@ -158,6 +159,7 @@ body {
     border-radius: 22px;
     padding: 16px;
     box-shadow: var(--shadow);
+    min-width: 0;
 }
 
 .editor-card-header {
@@ -179,7 +181,7 @@ body {
 
 .editor-table-row {
     display: grid;
-    grid-template-columns: 60px 1.2fr 1fr 1.1fr 1fr 110px 70px;
+    grid-template-columns: 56px 1.1fr 1.1fr 0.75fr 1fr 0.9fr 0.9fr 1fr 0.8fr 0.7fr 70px;
     gap: 8px;
     align-items: center;
 }
@@ -189,6 +191,7 @@ body {
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.8px;
+    white-space: nowrap;
 }
 
 .editor-table-row input,
@@ -196,6 +199,18 @@ body {
     width: 100%;
     padding: 8px 10px;
     font-size: 13px;
+}
+
+.editor-table-note {
+    min-height: 36px;
+    padding: 6px 8px;
+    border-radius: 10px;
+    border: 1px dashed var(--line);
+    background: #f8fafc;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
 }
 
 .editor-json {
@@ -415,6 +430,14 @@ button:not(:disabled):hover {
     font-size: 12px;
     color: var(--muted);
     line-height: 1.45;
+}
+
+.checkbox-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
 }
 
 .status-line {

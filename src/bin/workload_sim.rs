@@ -3,9 +3,10 @@ use htsim_rs::cc::ring::{self, RingAllreduceConfig, RingTransport, RoutingMode a
 use htsim_rs::net::{EcmpHashMode, NetWorld, NodeId};
 use htsim_rs::proto::dctcp::{DctcpConfig, DctcpConn, DctcpDoneCallback};
 use htsim_rs::proto::tcp::{TcpConfig, TcpConn, TcpDoneCallback};
+use htsim_rs::queue::DEFAULT_PKT_BYTES;
 use htsim_rs::sim::{
-    HostSpec, RoutingMode, SimTime, Simulator, StepSpec, TopologySpec, TransportProtocol,
-    WorkloadDefaults, WorkloadSpec,
+    HostSpec, RankStepKind, RankStepSpec, RoutingMode, SendRecvDirection, SimTime, Simulator,
+    StepSpec, TopologySpec, TransportProtocol, WorkloadDefaults, WorkloadSpec,
 };
 use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
 use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
@@ -37,6 +38,28 @@ struct Args {
     /// Override routing: per_flow or per_packet
     #[arg(long)]
     routing: Option<String>,
+
+    /// Print per-allreduce flow completion time (FCT) stats
+    #[arg(long)]
+    fct_stats: bool,
+
+    /// Override all link queue capacity in bytes
+    #[arg(long)]
+    queue_bytes: Option<u64>,
+
+    /// Override all link queue capacity in packets (1500B each)
+    #[arg(long)]
+    queue_pkts: Option<u64>,
+}
+
+struct AllreduceRecord {
+    step_id: Option<u64>,
+    label: Option<String>,
+    comm_id: Option<String>,
+    op: Option<String>,
+    comm_bytes: u64,
+    hosts: usize,
+    handle: ring::RingAllreduceHandle,
 }
 
 struct WorkloadState {
@@ -49,11 +72,51 @@ struct WorkloadState {
     next_flow_id: u64,
     tcp_cfg: TcpConfig,
     dctcp_cfg: DctcpConfig,
+    allreduce_handles: Arc<Mutex<Vec<AllreduceRecord>>>,
 }
 
 struct StartWorkloadStep {
     idx: usize,
     state: Arc<Mutex<WorkloadState>>,
+}
+
+struct RankState {
+    steps: Vec<RankStepSpec>,
+    idx: usize,
+}
+
+struct CollectiveWait {
+    hosts: Vec<usize>,
+    comm_bytes: u64,
+    op: String,
+    arrived: Vec<usize>,
+}
+
+struct SendRecvWait {
+    comm_bytes: u64,
+    sender: Option<usize>,
+    receiver: Option<usize>,
+    arrived: Vec<usize>,
+}
+
+struct RankWorkloadState {
+    ranks: HashMap<usize, RankState>,
+    hosts_all: Vec<usize>,
+    host_map: HashMap<usize, NodeId>,
+    gpu_map: HashMap<usize, Option<String>>,
+    protocol: TransportProtocol,
+    routing: CcRoutingMode,
+    next_flow_id: u64,
+    tcp_cfg: TcpConfig,
+    dctcp_cfg: DctcpConfig,
+    pending_collectives: HashMap<String, CollectiveWait>,
+    pending_sendrecv: HashMap<String, SendRecvWait>,
+    allreduce_handles: Arc<Mutex<Vec<AllreduceRecord>>>,
+}
+
+struct StartRankStep {
+    rank_id: usize,
+    state: Arc<Mutex<RankWorkloadState>>,
 }
 
 struct TcpRingTransport {
@@ -134,14 +197,102 @@ impl RingTransport for DctcpRingTransport {
     }
 }
 
+fn compute_duration_ns_from_ms(ms: f64) -> u64 {
+    if !ms.is_finite() || ms <= 0.0 {
+        return 0;
+    }
+    (ms * 1_000_000.0).round() as u64
+}
+
+fn percentile_ns(values: &[u64], p: f64) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let p = if p <= 0.0 {
+        0.0
+    } else if p >= 1.0 {
+        1.0
+    } else {
+        p
+    };
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let idx = (p * sorted.len() as f64).ceil() as usize;
+    let idx = idx.saturating_sub(1).min(sorted.len().saturating_sub(1));
+    sorted.get(idx).copied()
+}
+
+fn start_p2p_flow(
+    sim: &mut Simulator,
+    world: &mut NetWorld,
+    protocol: TransportProtocol,
+    routing: CcRoutingMode,
+    tcp_cfg: &TcpConfig,
+    dctcp_cfg: &DctcpConfig,
+    flow_id: u64,
+    src: NodeId,
+    dst: NodeId,
+    bytes: u64,
+    done: ring::RingDoneCallback,
+) {
+    match protocol {
+        TransportProtocol::Tcp => {
+            let mut tcp = std::mem::take(&mut world.net.tcp);
+            let conn = match routing {
+                CcRoutingMode::PerFlow => {
+                    let route = world.net.route_ecmp_path(src, dst, flow_id);
+                    TcpConn::new(flow_id, src, dst, route, bytes, tcp_cfg.clone())
+                }
+                CcRoutingMode::PerPacket => {
+                    TcpConn::new_dynamic(flow_id, src, dst, bytes, tcp_cfg.clone())
+                }
+            };
+            let done_cb: TcpDoneCallback = Box::new(move |_, now, sim| {
+                done(now, sim);
+            });
+            tcp.set_done_callback(flow_id, done_cb);
+            tcp.start_conn(conn, sim, &mut world.net);
+            world.net.tcp = tcp;
+        }
+        TransportProtocol::Dctcp => {
+            let mut dctcp = std::mem::take(&mut world.net.dctcp);
+            let conn = match routing {
+                CcRoutingMode::PerFlow => {
+                    let route = world.net.route_ecmp_path(src, dst, flow_id);
+                    DctcpConn::new(flow_id, src, dst, route, bytes, dctcp_cfg.clone())
+                }
+                CcRoutingMode::PerPacket => {
+                    DctcpConn::new_dynamic(flow_id, src, dst, bytes, dctcp_cfg.clone())
+                }
+            };
+            let done_cb: DctcpDoneCallback = Box::new(move |_, now, sim| {
+                done(now, sim);
+            });
+            dctcp.set_done_callback(flow_id, done_cb);
+            dctcp.start_conn(conn, sim, &mut world.net);
+            world.net.dctcp = dctcp;
+        }
+    }
+}
+
 impl StartWorkloadStep {
     fn compute_duration_ns(step: &StepSpec) -> u64 {
         let ms = step.compute_ms.unwrap_or(0.0);
-        if !ms.is_finite() || ms <= 0.0 {
-            return 0;
-        }
-        (ms * 1_000_000.0).round() as u64
+        compute_duration_ns_from_ms(ms)
     }
+}
+
+fn rank_step_kind(step: &RankStepSpec) -> RankStepKind {
+    if let Some(kind) = &step.kind {
+        return kind.clone();
+    }
+    if step.peer.is_some() {
+        return RankStepKind::Sendrecv;
+    }
+    if step.comm_bytes.is_some() || step.hosts.is_some() || step.op.is_some() {
+        return RankStepKind::Collective;
+    }
+    RankStepKind::Compute
 }
 
 impl htsim_rs::sim::Event for StartWorkloadStep {
@@ -243,12 +394,17 @@ impl htsim_rs::sim::Event for StartWorkloadStep {
             TransportProtocol::Dctcp => Box::new(DctcpRingTransport { cfg: dctcp_cfg }),
         };
 
+        let handles = {
+            let st = state.lock().expect("workload state lock");
+            Arc::clone(&st.allreduce_handles)
+        };
+
         {
             let mut st = state.lock().expect("workload state lock");
             st.next_flow_id = st.next_flow_id.saturating_add(flow_span);
         }
 
-        ring::start_ring_allreduce_at(
+        let handle = ring::start_ring_allreduce_at(
             sim,
             RingAllreduceConfig {
                 ranks: host_nodes.len(),
@@ -261,6 +417,303 @@ impl htsim_rs::sim::Event for StartWorkloadStep {
             },
             next_at,
         );
+        let record = AllreduceRecord {
+            step_id: step.id,
+            label: step.label.clone(),
+            comm_id: None,
+            op: None,
+            comm_bytes,
+            hosts: hosts.len(),
+            handle,
+        };
+        if let Ok(mut list) = handles.lock() {
+            list.push(record);
+        }
+    }
+}
+
+impl htsim_rs::sim::Event for StartRankStep {
+    fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn htsim_rs::sim::World) {
+        let StartRankStep { rank_id, state } = *self;
+        let w = world
+            .as_any_mut()
+            .downcast_mut::<NetWorld>()
+            .expect("world must be NetWorld");
+
+        let (step, host_node, gpu, protocol, routing, tcp_cfg, dctcp_cfg, hosts_all) = {
+            let mut st = state.lock().expect("rank workload state lock");
+            let rank_state = match st.ranks.get_mut(&rank_id) {
+                Some(entry) => entry,
+                None => return,
+            };
+            if rank_state.idx >= rank_state.steps.len() {
+                return;
+            }
+            let step = rank_state.steps[rank_state.idx].clone();
+            rank_state.idx = rank_state.idx.saturating_add(1);
+            let host_node = *st.host_map.get(&rank_id).expect("unknown host id");
+            let gpu = st.gpu_map.get(&rank_id).and_then(|g| g.clone());
+            (
+                step,
+                host_node,
+                gpu,
+                st.protocol,
+                st.routing,
+                st.tcp_cfg.clone(),
+                st.dctcp_cfg.clone(),
+                st.hosts_all.clone(),
+            )
+        };
+
+        match rank_step_kind(&step) {
+            RankStepKind::Compute => {
+                let duration_ns = compute_duration_ns_from_ms(step.compute_ms.unwrap_or(0.0));
+                if duration_ns > 0 {
+                    if let Some(v) = &mut w.net.viz {
+                        v.push(VizEvent {
+                            t_ns: sim.now().0,
+                            pkt_id: None,
+                            flow_id: None,
+                            pkt_bytes: None,
+                            pkt_kind: None,
+                            kind: VizEventKind::GpuBusy {
+                                node: host_node.0,
+                                duration_ns,
+                                gpu,
+                                step_id: step.id,
+                                label: step.label.clone(),
+                            },
+                        });
+                    }
+                }
+                let next_at = SimTime(sim.now().0.saturating_add(duration_ns));
+                sim.schedule(
+                    next_at,
+                    StartRankStep {
+                        rank_id,
+                        state: Arc::clone(&state),
+                    },
+                );
+            }
+            RankStepKind::Collective => {
+                let comm_id = match step.comm_id.clone() {
+                    Some(id) => id,
+                    None => {
+                        sim.schedule(
+                            sim.now(),
+                            StartRankStep {
+                                rank_id,
+                                state: Arc::clone(&state),
+                            },
+                        );
+                        return;
+                    }
+                };
+                let comm_bytes = step.comm_bytes.unwrap_or(0);
+                let op = step.op.clone().unwrap_or_else(|| "allreduce".to_string());
+                let hosts = step.hosts.clone().unwrap_or_else(|| hosts_all.clone());
+
+                let mut start_cfg = None;
+                {
+                    let mut st = state.lock().expect("rank workload state lock");
+                    let entry = st
+                        .pending_collectives
+                        .entry(comm_id.clone())
+                        .or_insert_with(|| CollectiveWait {
+                            hosts: hosts.clone(),
+                            comm_bytes,
+                            op: op.clone(),
+                            arrived: Vec::new(),
+                        });
+                    if !entry.arrived.contains(&rank_id) {
+                        entry.arrived.push(rank_id);
+                    }
+                    if entry.arrived.len() == entry.hosts.len() {
+                        let entry = st
+                            .pending_collectives
+                            .remove(&comm_id)
+                            .expect("pending collective missing");
+                        if entry.comm_bytes == 0 || entry.hosts.len() <= 1 {
+                            start_cfg = Some((
+                                None,
+                                entry.hosts,
+                                entry.comm_bytes,
+                                Some(comm_id.clone()),
+                                Some(entry.op),
+                            ));
+                        } else {
+                            let host_nodes = entry
+                                .hosts
+                                .iter()
+                                .map(|hid| *st.host_map.get(hid).expect("unknown host id"))
+                                .collect::<Vec<_>>();
+                            let ranks = host_nodes.len();
+                            let total_steps = ranks.saturating_sub(1) * 2;
+                            let flow_span = (ranks as u64)
+                                .saturating_mul(total_steps as u64)
+                                .max(1);
+                            let start_flow_id = st.next_flow_id;
+                            st.next_flow_id = st.next_flow_id.saturating_add(flow_span);
+                            start_cfg = Some((
+                                Some((host_nodes, start_flow_id)),
+                                entry.hosts,
+                                entry.comm_bytes,
+                                Some(comm_id.clone()),
+                                Some(entry.op),
+                            ));
+                        }
+                    }
+                }
+
+                if let Some((maybe_hosts, hosts, bytes, comm_id, op)) = start_cfg {
+                    let done_state = Arc::clone(&state);
+                    let done_hosts = hosts.clone();
+                    let done_cb: ring::RingAllreduceDoneCallback = Box::new(move |now, sim| {
+                        for hid in &done_hosts {
+                            sim.schedule(
+                                now,
+                                StartRankStep {
+                                    rank_id: *hid,
+                                    state: Arc::clone(&done_state),
+                                },
+                            );
+                        }
+                    });
+                    if bytes == 0 || hosts.len() <= 1 {
+                        done_cb(sim.now(), sim);
+                        return;
+                    }
+                    let (host_nodes, start_flow_id) =
+                        maybe_hosts.expect("collective config missing");
+                    let chunk_bytes = (bytes + hosts.len() as u64 - 1) / hosts.len() as u64;
+                    let transport: Box<dyn RingTransport> = match protocol {
+                        TransportProtocol::Tcp => Box::new(TcpRingTransport { cfg: tcp_cfg }),
+                        TransportProtocol::Dctcp => Box::new(DctcpRingTransport { cfg: dctcp_cfg }),
+                    };
+                    let handles = {
+                        let st = state.lock().expect("rank workload state lock");
+                        Arc::clone(&st.allreduce_handles)
+                    };
+                    let handle = ring::start_ring_allreduce_at(
+                        sim,
+                        RingAllreduceConfig {
+                            ranks: host_nodes.len(),
+                            hosts: host_nodes,
+                            chunk_bytes,
+                            routing,
+                            start_flow_id,
+                            transport,
+                            done_cb: Some(done_cb),
+                        },
+                        sim.now(),
+                    );
+                    let record = AllreduceRecord {
+                        step_id: step.id,
+                        label: step.label.clone(),
+                        comm_id,
+                        op,
+                        comm_bytes: bytes,
+                        hosts: hosts.len(),
+                        handle,
+                    };
+                    if let Ok(mut list) = handles.lock() {
+                        list.push(record);
+                    }
+                }
+            }
+            RankStepKind::Sendrecv => {
+                let comm_id = match step.comm_id.clone() {
+                    Some(id) => id,
+                    None => {
+                        sim.schedule(
+                            sim.now(),
+                            StartRankStep {
+                                rank_id,
+                                state: Arc::clone(&state),
+                            },
+                        );
+                        return;
+                    }
+                };
+                let comm_bytes = step.comm_bytes.unwrap_or(0);
+                let direction = step.direction.unwrap_or(SendRecvDirection::Send);
+                let peer = step.peer;
+
+                let mut start_cfg = None;
+                {
+                    let mut st = state.lock().expect("rank workload state lock");
+                    let entry = st
+                        .pending_sendrecv
+                        .entry(comm_id.clone())
+                        .or_insert_with(|| SendRecvWait {
+                            comm_bytes,
+                            sender: None,
+                            receiver: None,
+                            arrived: Vec::new(),
+                        });
+                    if !entry.arrived.contains(&rank_id) {
+                        entry.arrived.push(rank_id);
+                    }
+                    match direction {
+                        SendRecvDirection::Send => {
+                            entry.sender = Some(rank_id);
+                            if entry.receiver.is_none() {
+                                entry.receiver = peer;
+                            }
+                        }
+                        SendRecvDirection::Recv => {
+                            entry.receiver = Some(rank_id);
+                            if entry.sender.is_none() {
+                                entry.sender = peer;
+                            }
+                        }
+                    }
+                    if let (Some(sender), Some(receiver)) = (entry.sender, entry.receiver) {
+                        let entry = st
+                            .pending_sendrecv
+                            .remove(&comm_id)
+                            .expect("pending sendrecv missing");
+                        let src = *st.host_map.get(&sender).expect("unknown host id");
+                        let dst = *st.host_map.get(&receiver).expect("unknown host id");
+                        let flow_id = st.next_flow_id;
+                        st.next_flow_id = st.next_flow_id.saturating_add(1);
+                        start_cfg = Some((sender, receiver, entry.comm_bytes, flow_id, src, dst));
+                    }
+                }
+
+                if let Some((sender, receiver, bytes, flow_id, src, dst)) = start_cfg {
+                    let done_state = Arc::clone(&state);
+                    let done_cb: ring::RingDoneCallback = Box::new(move |now, sim| {
+                        for hid in [sender, receiver] {
+                            sim.schedule(
+                                now,
+                                StartRankStep {
+                                    rank_id: hid,
+                                    state: Arc::clone(&done_state),
+                                },
+                            );
+                        }
+                    });
+                    if bytes == 0 || sender == receiver {
+                        done_cb(sim.now(), sim);
+                        return;
+                    }
+                    start_p2p_flow(
+                        sim,
+                        w,
+                        protocol,
+                        routing,
+                        &tcp_cfg,
+                        &dctcp_cfg,
+                        flow_id,
+                        src,
+                        dst,
+                        bytes,
+                        done_cb,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -369,6 +822,17 @@ fn main() {
     let topo_hosts = build_topology(&mut world, &workload.topology);
     let (host_ids, host_map, gpu_map) = resolve_hosts(&workload.hosts, &topo_hosts);
 
+    let queue_bytes = if let Some(bytes) = args.queue_bytes {
+        Some(bytes)
+    } else if let Some(pkts) = args.queue_pkts {
+        Some(pkts.saturating_mul(DEFAULT_PKT_BYTES))
+    } else {
+        None
+    };
+    if let Some(bytes) = queue_bytes {
+        world.net.set_all_link_queue_capacity_bytes(bytes);
+    }
+
     let defaults = workload.defaults.clone().unwrap_or(WorkloadDefaults {
         protocol: Some(TransportProtocol::Tcp),
         routing: Some(RoutingMode::PerFlow),
@@ -388,30 +852,101 @@ fn main() {
         world.net.emit_viz_meta();
     }
 
-    let state = Arc::new(Mutex::new(WorkloadState {
-        steps: workload.steps.clone(),
-        hosts_all: host_ids,
-        host_map,
-        gpu_map,
-        protocol,
-        routing,
-        next_flow_id: 1,
-        tcp_cfg: TcpConfig::default(),
-        dctcp_cfg: DctcpConfig::default(),
-    }));
+    let allreduce_handles = Arc::new(Mutex::new(Vec::new()));
 
-    sim.schedule(
-        SimTime::ZERO,
-        StartWorkloadStep {
-            idx: 0,
-            state: Arc::clone(&state),
-        },
-    );
+    if workload.schema_version >= 2 && !workload.ranks.is_empty() {
+        let mut ranks = HashMap::new();
+        for rank in &workload.ranks {
+            ranks.insert(
+                rank.id,
+                RankState {
+                    steps: rank.steps.clone(),
+                    idx: 0,
+                },
+            );
+        }
+        let state = Arc::new(Mutex::new(RankWorkloadState {
+            ranks,
+            hosts_all: host_ids.clone(),
+            host_map,
+            gpu_map,
+            protocol,
+            routing,
+            next_flow_id: 1,
+            tcp_cfg: TcpConfig::default(),
+            dctcp_cfg: DctcpConfig::default(),
+            pending_collectives: HashMap::new(),
+            pending_sendrecv: HashMap::new(),
+            allreduce_handles: Arc::clone(&allreduce_handles),
+        }));
+
+        for rank_id in host_ids {
+            sim.schedule(
+                SimTime::ZERO,
+                StartRankStep {
+                    rank_id,
+                    state: Arc::clone(&state),
+                },
+            );
+        }
+    } else {
+        let state = Arc::new(Mutex::new(WorkloadState {
+            steps: workload.steps.clone(),
+            hosts_all: host_ids,
+            host_map,
+            gpu_map,
+            protocol,
+            routing,
+            next_flow_id: 1,
+            tcp_cfg: TcpConfig::default(),
+            dctcp_cfg: DctcpConfig::default(),
+            allreduce_handles: Arc::clone(&allreduce_handles),
+        }));
+
+        sim.schedule(
+            SimTime::ZERO,
+            StartWorkloadStep {
+                idx: 0,
+                state: Arc::clone(&state),
+            },
+        );
+    }
 
     if let Some(until_ms) = args.until_ms {
         sim.run_until(SimTime::from_millis(until_ms), &mut world);
     } else {
         sim.run(&mut world);
+    }
+
+    if args.fct_stats {
+        if let Ok(list) = allreduce_handles.lock() {
+            for record in list.iter() {
+                let stats = record.handle.stats();
+                let start = stats.start_at.unwrap_or(SimTime::ZERO);
+                let fct_ns = stats
+                    .done_at
+                    .map(|d| d.0.saturating_sub(start.0))
+                    .unwrap_or(0);
+                let p99_ns = percentile_ns(&stats.flow_fct_ns, 0.99).unwrap_or(0);
+                let max_flow_ns = stats.flow_fct_ns.iter().copied().max().unwrap_or(0);
+                let makespan_ms = fct_ns as f64 / 1_000_000.0;
+                let p99_ms = p99_ns as f64 / 1_000_000.0;
+                let max_flow_ms = max_flow_ns as f64 / 1_000_000.0;
+                println!(
+                    "allreduce_fct step_id={:?} label={:?} comm_id={:?} op={:?} hosts={} comm_bytes={} makespan_ms={:.6} p99_flow_fct_ms={:.6} max_flow_fct_ms={:.6} flows={}",
+                    record.step_id,
+                    record.label,
+                    record.comm_id,
+                    record.op,
+                    record.hosts,
+                    record.comm_bytes,
+                    makespan_ms,
+                    p99_ms,
+                    max_flow_ms,
+                    stats.flow_fct_ns.len()
+                );
+            }
+        }
     }
 
     if let Some(path) = args.viz_json {
