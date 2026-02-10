@@ -107,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="workload_gen API server")
-    parser.add_argument("--host", default="192.168.103.5")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=3100)
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--model-dir", default=None)
