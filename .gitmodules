@@ -1,3 +1,9 @@
 [submodule "csg-htsim"]
 	path = csg-htsim
 	url = https://github.com/Broadcom/csg-htsim
+[submodule "NeuSight"]
+	path = NeuSight
+	url = https://github.com/sitar-lab/NeuSight.git
+[submodule "SimAI"]
+	path = SimAI
+	url = https://github.com/aliyun/SimAI.git

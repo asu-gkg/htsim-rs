@@ -34,37 +34,6 @@
 
                 <section class="editor-card">
                     <div class="editor-card-header">
-                        <h2>仿真运行</h2>
-                        <span class="chip">workload_sim</span>
-                    </div>
-                    <div class="grid">
-                        <label>保存 workload</label>
-                        <input v-model="simWorkloadName" type="text" placeholder="workload.json" />
-                    </div>
-                    <div class="grid">
-                        <label>输出事件</label>
-                        <input v-model="simOutputName" type="text" placeholder="out.json" />
-                    </div>
-                    <div class="row">
-                        <label class="checkbox-line">
-                            <input v-model="simFctStats" type="checkbox" />
-                            统计 FCT
-                        </label>
-                        <div class="grid">
-                            <label>until_ms</label>
-                            <input v-model="simUntilMs" type="text" placeholder="可选" />
-                        </div>
-                    </div>
-                    <button type="button" @click="runWorkloadSim" :disabled="simRunning">一键生成 out.json</button>
-                    <div class="small status-line">{{ simStatus }}</div>
-                    <div v-if="simCommand" class="small status-line">命令: {{ simCommand }}</div>
-                    <div class="small status-line">来源: {{ simSource }}</div>
-                    <pre v-if="simLog" class="log">{{ simLog }}</pre>
-                    <div class="small">会写入 `viz/workloads/` 与 `viz/outputs/`。</div>
-                </section>
-
-                <section class="editor-card">
-                    <div class="editor-card-header">
                         <h2>模型</h2>
                         <span class="chip">DLmodel_configs</span>
                     </div>
@@ -97,54 +66,66 @@
                     <div class="small">读取 `NeuSight/scripts/asplos/data/DLmodel_configs`。</div>
                 </section>
 
-                <section v-if="showPrediction" class="editor-card">
+                <section class="editor-card">
                     <div class="editor-card-header">
-                        <h2>预测数据</h2>
-                        <span class="chip">prediction</span>
-                    </div>
-                    <div class="grid">
-                        <label>GPU</label>
-                        <select v-model="predictionGpu">
-                            <option value="">使用 Hosts GPU</option>
-                            <option v-for="item in gpuOptions" :key="item" :value="item">
-                                {{ item }}
-                            </option>
-                        </select>
+                        <h2>生成参数</h2>
+                        <span class="chip">common</span>
                     </div>
                     <div class="row">
                         <div class="grid">
-                            <label>预测器</label>
-                            <select v-model="predictionPredictor">
-                                <option v-for="item in predictorOptions" :key="item" :value="item">
-                                    {{ item }}
-                                </option>
-                            </select>
+                            <label>Hosts</label>
+                            <input :value="hostCount" type="text" readonly />
                         </div>
                         <div class="grid">
+                            <label>GPU 型号</label>
+                            <input v-model="gpuModel" type="text" list="gpu-options" placeholder="例如 NVIDIA_A100-PCIE-40GB" />
+                            <datalist id="gpu-options">
+                                <option v-for="item in gpuOptions" :key="item" :value="item"></option>
+                            </datalist>
+                        </div>
+                    </div>
+                    <div class="small">默认使用 topo_index = id，生成 rank0..rankN。</div>
+                    <div class="row">
+                        <div class="grid">
                             <label>模式</label>
-                            <select v-model="predictionMode">
+                            <select v-model="workloadMode">
                                 <option value="train">train</option>
                                 <option value="inf">inf</option>
                             </select>
+                        </div>
+                        <div class="grid"></div>
+                    </div>
+                    <div class="row">
+                        <div class="grid">
+                            <label>dtype</label>
+                            <select v-model="workloadDtype">
+                                <option value="fp16">fp16</option>
+                                <option value="bf16">bf16</option>
+                                <option value="fp32">fp32</option>
+                            </select>
+                        </div>
+                        <div class="grid">
+                            <label>bytes/elem</label>
+                            <input :value="bytesPerElement" type="text" readonly />
                         </div>
                     </div>
                     <div class="row">
                         <div class="grid">
                             <label>seq</label>
-                            <input v-model="predictionSeq" type="text" list="seq-options" placeholder="例如 2" />
+                            <input v-model="workloadSeq" type="text" list="seq-options" placeholder="例如 2" />
                             <datalist id="seq-options">
                                 <option v-for="item in seqOptions" :key="item" :value="item"></option>
                             </datalist>
                         </div>
                         <div class="grid">
                             <label>batch</label>
-                            <input v-model="predictionBatch" type="text" list="batch-options" placeholder="例如 512" />
+                            <input v-model="workloadBatch" type="text" list="batch-options" placeholder="例如 512" />
                             <datalist id="batch-options">
                                 <option v-for="item in batchOptions" :key="item" :value="item"></option>
                             </datalist>
                         </div>
                     </div>
-                    <div class="row">
+                    <div class="row3">
                         <div class="grid">
                             <label>DP</label>
                             <input v-model="parallelDp" type="text" placeholder="1" />
@@ -170,6 +151,21 @@
                                 <option value="fwd_bwd">fwd_bwd</option>
                             </select>
                         </div>
+                    </div>
+                </section>
+
+                <section v-if="showPrediction" class="editor-card">
+                    <div class="editor-card-header">
+                        <h2>预测数据</h2>
+                        <span class="chip">prediction</span>
+                    </div>
+                    <div class="grid">
+                        <label>预测器</label>
+                        <select v-model="predictionPredictor">
+                            <option v-for="item in predictorOptions" :key="item" :value="item">
+                                {{ item }}
+                            </option>
+                        </select>
                     </div>
                     <div class="row">
                         <div class="grid">
@@ -201,26 +197,7 @@
                         <h2>真实测量生成器</h2>
                         <span class="chip">workload_gen</span>
                     </div>
-                    <div class="grid">
-                        <label>GPU</label>
-                        <input :value="gpuModel" type="text" readonly />
-                    </div>
                     <div class="row">
-                        <div class="grid">
-                            <label>模式</label>
-                            <select v-model="hookMode">
-                                <option value="train">train</option>
-                                <option value="inf">inf</option>
-                            </select>
-                        </div>
-                        <div class="grid">
-                            <label>dtype</label>
-                            <select v-model="hookDtype">
-                                <option value="fp16">fp16</option>
-                                <option value="bf16">bf16</option>
-                                <option value="fp32">fp32</option>
-                            </select>
-                        </div>
                         <div class="grid">
                             <label>device</label>
                             <select v-model="hookDevice">
@@ -228,47 +205,14 @@
                                 <option value="cpu">cpu</option>
                             </select>
                         </div>
+                        <div class="grid"></div>
                     </div>
                     <div class="row">
-                        <div class="grid">
-                            <label>seq</label>
-                            <input v-model="hookSeq" type="text" placeholder="例如 1024" />
-                        </div>
-                        <div class="grid">
-                            <label>batch</label>
-                            <input v-model="hookBatch" type="text" placeholder="例如 8" />
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="grid">
-                            <label>DP</label>
-                            <input v-model="parallelDp" type="text" placeholder="1" />
-                        </div>
-                        <div class="grid">
-                            <label>TP</label>
-                            <input v-model="parallelTp" type="text" placeholder="1" />
-                        </div>
-                        <div class="grid">
-                            <label>PP</label>
-                            <input v-model="parallelPp" type="text" placeholder="1" />
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="grid">
-                            <label>PP microbatch</label>
-                            <input v-model="parallelPpMicrobatch" type="text" placeholder="例如 1" />
-                        </div>
-                        <div class="grid">
-                            <label>Pipeline</label>
-                            <select v-model="pipelineSchedule">
-                                <option value="1f1b">1f1b</option>
-                                <option value="fwd_bwd">fwd_bwd</option>
-                            </select>
-                        </div>
                         <div class="grid">
                             <label>TP comm factor</label>
                             <input v-model="hookTpCommFactor" type="text" placeholder="例如 2" />
                         </div>
+                        <div class="grid"></div>
                     </div>
                     <div class="row">
                         <div class="grid">
@@ -284,7 +228,7 @@
                     <div class="row">
                         <div class="grid">
                             <label>后端</label>
-                            <input type="text" :value="hookApi" readonly />
+                            <input type="text" :value="hookProxyApi" readonly />
                         </div>
                     </div>
                     <button type="button" @click="buildFromHook" :disabled="!canBuildHook">生成 workload</button>
@@ -351,23 +295,6 @@
                         </div>
                     </div>
                     <div class="small status-line">{{ topologyHint }}</div>
-                </section>
-
-                <section class="editor-card">
-                    <div class="editor-card-header">
-                        <h2>Hosts</h2>
-                    </div>
-                    <div class="row">
-                        <div class="grid">
-                            <label>host 数量</label>
-                            <input :value="hostCount" type="text" readonly />
-                        </div>
-                        <div class="grid">
-                            <label>GPU 型号</label>
-                            <input v-model="gpuModel" type="text" placeholder="例如 NVIDIA_A100" />
-                        </div>
-                    </div>
-                    <div class="small">默认使用 topo_index = id，生成 rank0..rankN。</div>
                 </section>
 
             </div>
@@ -515,10 +442,11 @@ const modelName = ref("bert");
 const modelNumLayers = ref("");
 const modelType = ref("");
 const modelMaxPosition = ref("");
-const hookMode = ref("train");
-const hookSeq = ref("2");
-const hookBatch = ref("512");
-const hookDtype = ref("fp16");
+const workloadMode = ref("train");
+const workloadSeq = ref("2");
+const workloadBatch = ref("512");
+const workloadDtype = ref("fp16");
+const bytesPerElement = computed(() => (workloadDtype.value === "fp32" ? 4 : 2));
 const hookDevice = ref("cuda");
 const hookWarmup = ref("1");
 const hookSteps = ref("1");
@@ -559,9 +487,9 @@ watch(
             modelMaxPosition.value = maxPos != null ? String(maxPos) : "";
             const maxPosNum = parseNumber(modelMaxPosition.value, NaN);
             if (Number.isFinite(maxPosNum)) {
-                const seqNum = parseNumber(hookSeq.value, NaN);
+                const seqNum = parseNumber(workloadSeq.value, NaN);
                 if (!Number.isFinite(seqNum) || seqNum > maxPosNum) {
-                    hookSeq.value = String(maxPosNum);
+                    workloadSeq.value = String(maxPosNum);
                 }
             }
             return;
@@ -590,22 +518,8 @@ const localWorkloadKey = ref("");
 const localWorkloadStatus = ref(
     localWorkloads.length ? "请选择本地 workload.json。" : "未发现本地 workload.json。"
 );
-const simWorkloadName = ref("workload.json");
-const simOutputName = ref("out.json");
-const simUntilMs = ref("");
-const simFctStats = ref(true);
-const simStatus = ref("");
-const simCommand = ref("");
-const simLog = ref("");
-const simRunning = ref(false);
 const copyStatus = ref("");
 const metaSource = ref("");
-
-const simSource = computed(() => {
-    if (!localWorkloadKey.value) return "编辑器 JSON";
-    const entry = localWorkloads.find((item) => item.key === localWorkloadKey.value);
-    return entry ? `本地文件: ${entry.label}` : "编辑器 JSON";
-});
 
 const topology = reactive({
     kind: "fat_tree",
@@ -682,14 +596,9 @@ const predictorOptions = Array.from(
     new Set([...predictionEntries.map((item) => item.predictor), "neusight", "micro", "roofline", "habitat"])
 ).sort();
 
-const predictionGpu = ref("NVIDIA_A100-PCIE-40GB");
-const predictionGpuResolved = computed(() => predictionGpu.value || gpuModel.value.trim());
 const predictionPredictor = ref(
     predictorOptions.includes("neusight") ? "neusight" : predictorOptions[0] || ""
 );
-const predictionMode = ref("train");
-const predictionSeq = ref("2");
-const predictionBatch = ref("512");
 const parallelDp = ref("2");
 const parallelTp = ref("1");
 const parallelPp = ref("1");
@@ -715,9 +624,9 @@ const hostCount = computed(() => String(hostCountValue.value));
 
 const filteredPredictions = computed(() => {
     const model = modelName.value.trim();
-    const gpu = predictionGpuResolved.value;
+    const gpu = gpuModel.value.trim();
     const predictor = predictionPredictor.value;
-    const mode = predictionMode.value;
+    const mode = workloadMode.value;
     const options = predictionOptions.value;
     if (!model || !gpu || !predictor || !mode) return [];
     return predictionEntries.filter(
@@ -734,7 +643,7 @@ const seqOptions = computed(() => {
     return Array.from(set).sort((a, b) => a - b);
 });
 const batchOptions = computed(() => {
-    const seq = Number(predictionSeq.value);
+    const seq = Number(workloadSeq.value);
     const pool = Number.isFinite(seq)
         ? filteredPredictions.value.filter((item) => item.seq === seq)
         : filteredPredictions.value;
@@ -742,18 +651,18 @@ const batchOptions = computed(() => {
     return Array.from(set).sort((a, b) => a - b);
 });
 const selectedPrediction = computed(() => {
-    const seq = Number(predictionSeq.value);
-    const batch = Number(predictionBatch.value);
+    const seq = Number(workloadSeq.value);
+    const batch = Number(workloadBatch.value);
     if (!Number.isFinite(seq) || !Number.isFinite(batch)) return null;
     return filteredPredictions.value.find((item) => item.seq === seq && item.batch === batch) || null;
 });
 const canBuildPrediction = computed(() => {
     const model = modelName.value.trim();
-    const gpu = predictionGpuResolved.value;
+    const gpu = gpuModel.value.trim();
     const predictor = predictionPredictor.value;
-    const mode = predictionMode.value;
-    const seq = Number(predictionSeq.value);
-    const batch = Number(predictionBatch.value);
+    const mode = workloadMode.value;
+    const seq = Number(workloadSeq.value);
+    const batch = Number(workloadBatch.value);
     if (!dpDegree.value || !tpDegree.value || !ppDegree.value) return false;
     if (ppDegree.value > 1) {
         const layers = parseNumber(modelNumLayers.value, 0);
@@ -772,8 +681,8 @@ const canBuildPrediction = computed(() => {
 const canBuildHook = computed(() => {
     const model = modelName.value.trim();
     const gpu = gpuModel.value.trim();
-    const seq = parseNumber(hookSeq.value, NaN);
-    const batch = parseNumber(hookBatch.value, NaN);
+    const seq = parseNumber(workloadSeq.value, NaN);
+    const batch = parseNumber(workloadBatch.value, NaN);
     if (!dpDegree.value || !tpDegree.value || !ppDegree.value) return false;
     if (ppDegree.value > 1) {
         const layers = parseNumber(modelNumLayers.value, 0);
@@ -850,7 +759,7 @@ function pickDefaultPrediction(entries) {
 
 function updatePredictionStatus(entries) {
     const model = modelName.value.trim();
-    const gpu = predictionGpuResolved.value;
+    const gpu = gpuModel.value.trim();
     if (!model || !gpu) {
         predictionStatus.value = "请选择模型与 GPU。";
         return;
@@ -870,11 +779,11 @@ function updatePredictionStatus(entries) {
             return;
         }
     }
-    if (!predictionSeq.value) predictionSeq.value = String(DEFAULT_SEQ);
-    if (!predictionBatch.value) predictionBatch.value = String(DEFAULT_BATCH);
+    if (!workloadSeq.value) workloadSeq.value = String(DEFAULT_SEQ);
+    if (!workloadBatch.value) workloadBatch.value = String(DEFAULT_BATCH);
 
-    const seq = Number(predictionSeq.value);
-    const batch = Number(predictionBatch.value);
+    const seq = Number(workloadSeq.value);
+    const batch = Number(workloadBatch.value);
     const hasLocal =
         Number.isFinite(seq) &&
         Number.isFinite(batch) &&
@@ -891,8 +800,8 @@ function updatePredictionStatus(entries) {
     }
     if (!useBackend.value) {
         const pick = pickDefaultPrediction(entries);
-        predictionSeq.value = pick ? String(pick.seq) : predictionSeq.value;
-        predictionBatch.value = pick ? String(pick.batch) : predictionBatch.value;
+        workloadSeq.value = pick ? String(pick.seq) : workloadSeq.value;
+        workloadBatch.value = pick ? String(pick.batch) : workloadBatch.value;
         predictionStatus.value = "已选择本地 CSV。";
         return;
     }
@@ -934,8 +843,8 @@ function updateHookStatus() {
             return;
         }
     }
-    const seq = parseNumber(hookSeq.value, NaN);
-    const batch = parseNumber(hookBatch.value, NaN);
+    const seq = parseNumber(workloadSeq.value, NaN);
+    const batch = parseNumber(workloadBatch.value, NaN);
     if (!Number.isFinite(seq) || seq <= 0 || !Number.isFinite(batch) || batch <= 0) {
         hookStatus.value = "seq/batch 需要是正整数。";
         return;
@@ -1001,9 +910,9 @@ watch(
     [
         modelName,
         gpuModel,
-        hookSeq,
-        hookBatch,
-        hookMode,
+        workloadSeq,
+        workloadBatch,
+        workloadMode,
         parallelDp,
         parallelTp,
         parallelPp,
@@ -1016,15 +925,15 @@ watch(
     { immediate: true }
 );
 
-watch(predictionSeq, (next) => {
+watch(workloadSeq, (next) => {
     if (useBackend.value) return;
     const seq = Number(next);
     if (!Number.isFinite(seq)) return;
     const entries = filteredPredictions.value.filter((item) => item.seq === seq);
     if (!entries.length) return;
-    const batch = Number(predictionBatch.value);
+    const batch = Number(workloadBatch.value);
     if (!Number.isFinite(batch) || !entries.some((item) => item.batch === batch)) {
-        predictionBatch.value = String(entries[0].batch);
+        workloadBatch.value = String(entries[0].batch);
     }
 });
 
@@ -1074,7 +983,7 @@ const COMM_OPS = new Set([
     "REDUCESCATTER_DP_EP",
     "SENDRECV",
 ]);
-const BYTES_PER_ELEMENT = 4;
+const BYTES_PER_ELEMENT = bytesPerElement;
 
 function parseCsv(text) {
     const rows = [];
@@ -1498,12 +1407,12 @@ function buildRanksFromRows(rows) {
     }
     const layerCount = layers > 0 ? Math.floor(layers) : 1;
     const { prologue, layers: layerBlocks, epilogue } = splitLayers(rows, model, layerCount);
-    const layerStats = layerBlocks.map((layer) => collectLayerStats(layer, BYTES_PER_ELEMENT));
+    const layerStats = layerBlocks.map((layer) => collectLayerStats(layer, BYTES_PER_ELEMENT.value));
     if (layerStats.length % pp !== 0) {
         throw new Error("num_layers must be divisible by pp");
     }
-    const prologueStats = prologue.length ? collectLayerStats(prologue, BYTES_PER_ELEMENT) : null;
-    const epilogueStats = epilogue.length ? collectLayerStats(epilogue, BYTES_PER_ELEMENT) : null;
+    const prologueStats = prologue.length ? collectLayerStats(prologue, BYTES_PER_ELEMENT.value) : null;
+    const epilogueStats = epilogue.length ? collectLayerStats(epilogue, BYTES_PER_ELEMENT.value) : null;
     const perStage = layerStats.length / pp;
     const stageStats = [];
     for (let stage = 0; stage < pp; stage += 1) {
@@ -1641,7 +1550,7 @@ const jsonText = computed(() => {
     const metaOut = buildMeta();
     if (metaOut) data.meta = metaOut;
     if (defaults.protocol) {
-        data.defaults = { protocol: defaults.protocol, bytes_per_element: BYTES_PER_ELEMENT };
+        data.defaults = { protocol: defaults.protocol, bytes_per_element: BYTES_PER_ELEMENT.value };
     }
     return JSON.stringify(data, null, 2);
 });
@@ -1692,6 +1601,7 @@ function loadSample() {
     parallelPp.value = "1";
     parallelPpMicrobatch.value = "1";
     pipelineSchedule.value = "1f1b";
+    workloadDtype.value = "fp16";
     const sampleHosts = "0,1";
     const sampleSteps = () => [
         {
@@ -1860,6 +1770,14 @@ function applyWorkloadData(data) {
         if (data.topology?.k != null) topology.k = String(data.topology.k);
         if (data.topology?.link_gbps != null) topology.link_gbps = String(data.topology.link_gbps);
         defaults.protocol = data.defaults?.protocol || "tcp";
+        const dtype = data.meta?.profile?.dtype;
+        if (dtype === "fp16" || dtype === "bf16" || dtype === "fp32") {
+            workloadDtype.value = dtype;
+        } else if (data.defaults?.bytes_per_element === 2) {
+            workloadDtype.value = "fp16";
+        } else if (data.defaults?.bytes_per_element === 4) {
+            workloadDtype.value = "fp32";
+        }
         if (data.meta?.source != null) metaSource.value = String(data.meta.source || "");
         if (data.meta?.model != null) modelName.value = String(data.meta.model || "");
         if (data.meta?.num_layers != null) modelNumLayers.value = String(data.meta.num_layers || "");
@@ -1913,78 +1831,6 @@ function loadLocalWorkload() {
     }
 }
 
-async function runWorkloadSim() {
-    if (simRunning.value) return;
-    const localEntry = localWorkloads.find((item) => item.key === localWorkloadKey.value);
-    let workload = null;
-    if (!localEntry) {
-        try {
-            workload = JSON.parse(jsonText.value);
-        } catch (err) {
-            simStatus.value = "当前 JSON 解析失败，无法运行。";
-            return;
-        }
-    }
-    const workloadName = simWorkloadName.value.trim() || "workload.json";
-    const outputName = simOutputName.value.trim() || "out.json";
-    const until = parseNumber(simUntilMs.value, NaN);
-    const payload = {
-        output_name: outputName,
-        fct_stats: simFctStats.value,
-    };
-    if (localEntry) {
-        payload.workload_path = `viz/workloads/${localEntry.label}`;
-    } else {
-        payload.workload = workload;
-        payload.workload_name = workloadName;
-    }
-    if (Number.isFinite(until)) {
-        payload.until_ms = Math.max(0, Math.floor(until));
-    }
-    const workloadPath = localEntry
-        ? `viz/workloads/${localEntry.label}`
-        : `viz/workloads/${workloadName}`;
-    const commandParts = [
-        "cargo run --bin workload_sim -- --workload",
-        workloadPath,
-        "--viz-json",
-        `viz/outputs/${outputName}`,
-    ];
-    if (simFctStats.value) commandParts.push("--fct-stats");
-    if (Number.isFinite(until)) commandParts.push(`--until-ms ${Math.max(0, Math.floor(until))}`);
-    simCommand.value = commandParts.join(" ");
-    simStatus.value = "运行中，请稍候...";
-    simLog.value = "";
-    simRunning.value = true;
-    try {
-        const resp = await fetch("/api-sim/run", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        let data = null;
-        try {
-            data = await resp.json();
-        } catch (parseErr) {
-            data = null;
-        }
-        if (data?.stdout || data?.stderr) {
-            simLog.value = [data.stdout, data.stderr].filter(Boolean).join("\n");
-        }
-        if (!resp.ok || !data?.ok) {
-            const errMsg = data?.error || `backend status ${resp.status}`;
-            simStatus.value = `运行失败：${errMsg}`;
-            return;
-        }
-        simStatus.value = `完成：${data.output_path || "已生成 out.json"}`;
-    } catch (err) {
-        const message = err?.message || "unknown error";
-        simStatus.value = `运行失败：${message}`;
-    } finally {
-        simRunning.value = false;
-    }
-}
-
 async function buildFromHook() {
     if (!canBuildHook.value) {
         hookStatus.value = "请选择有效的模型/GPU/seq/batch。";
@@ -1992,8 +1838,8 @@ async function buildFromHook() {
     }
     const model = modelName.value.trim();
     const gpu = gpuModel.value.trim();
-    const seq = parseNumber(hookSeq.value, NaN);
-    const batch = parseNumber(hookBatch.value, NaN);
+    const seq = parseNumber(workloadSeq.value, NaN);
+    const batch = parseNumber(workloadBatch.value, NaN);
     const dp = dpDegree.value || 1;
     const tp = tpDegree.value || 1;
     const pp = ppDegree.value || 1;
@@ -2004,7 +1850,7 @@ async function buildFromHook() {
     const payload = {
         model,
         gpu,
-        mode: hookMode.value,
+        mode: workloadMode.value,
         seq,
         batch,
         dp,
@@ -2012,7 +1858,7 @@ async function buildFromHook() {
         pp,
         pp_microbatch: ppMicro,
         pipeline: pipelineSchedule.value,
-        dtype: hookDtype.value,
+        dtype: workloadDtype.value,
         device: hookDevice.value,
         warmup_steps: warmupSteps,
         measure_steps: measureSteps,
@@ -2043,24 +1889,20 @@ async function buildFromHook() {
             }
             return { resp, data };
         };
+
         let endpoint = hookProxyApi;
-        let resp = null;
-        let data = null;
+        let result = null;
         try {
-            ({ resp, data } = await postJson(endpoint));
-            if ([404, 502, 503].includes(resp.status)) {
-                throw new Error(`hook proxy unavailable (status ${resp.status})`);
+            result = await postJson(endpoint);
+            if ([404, 502, 503].includes(result.resp.status)) {
+                throw new Error(`hook proxy unavailable (status ${result.resp.status})`);
             }
         } catch (proxyErr) {
             endpoint = hookDirectApi.value;
-            ({ resp, data } = await postJson(endpoint));
+            result = await postJson(endpoint);
         }
-        let data = null;
-        try {
-            data = await resp.json();
-        } catch (parseErr) {
-            data = null;
-        }
+
+        const { resp, data } = result;
         const responseParts = [`status=${resp.status}`, `ok=${Boolean(data?.ok)}`, `endpoint=${endpoint}`];
         if (Number.isFinite(data?.elapsed_ms)) responseParts.push(`elapsed_ms=${data.elapsed_ms}`);
         if (data?.path) responseParts.push(`path=${data.path}`);
@@ -2086,11 +1928,11 @@ async function buildFromPrediction() {
         return;
     }
     const model = modelName.value.trim();
-    const gpu = predictionGpuResolved.value;
+    const gpu = gpuModel.value.trim();
     const predictor = predictionPredictor.value;
-    const mode = predictionMode.value;
-    const seq = parseNumber(predictionSeq.value, NaN);
-    const batch = parseNumber(predictionBatch.value, NaN);
+    const mode = workloadMode.value;
+    const seq = parseNumber(workloadSeq.value, NaN);
+    const batch = parseNumber(workloadBatch.value, NaN);
     const options = predictionOptions.value;
     const entry = selectedPrediction.value;
     const payload = { model, gpu, predictor, mode, seq, batch };

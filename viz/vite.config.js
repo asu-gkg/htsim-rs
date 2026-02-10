@@ -135,6 +135,94 @@ function simApiPlugin() {
                     res.end(JSON.stringify({ ok: false, error: err?.message || "server error" }));
                 }
             });
+
+            server.middlewares.use("/api-sim/run-multi", async (req, res) => {
+                if (req.method !== "POST") {
+                    res.setHeader("Content-Type", "application/json");
+                    res.statusCode = 405;
+                    res.end(JSON.stringify({ ok: false, error: "method not allowed" }));
+                    return;
+                }
+                try {
+                    const body = await readBody(req);
+                    const payload = JSON.parse(body || "{}");
+                    await fs.mkdir(workloadDir, { recursive: true });
+                    await fs.mkdir(outputDir, { recursive: true });
+
+                    const rawPaths = Array.isArray(payload.workload_paths) ? payload.workload_paths : [];
+                    if (!rawPaths.length) {
+                        res.setHeader("Content-Type", "application/json");
+                        res.statusCode = 400;
+                        res.end(JSON.stringify({ ok: false, error: "missing workload_paths" }));
+                        return;
+                    }
+
+                    const workloadPaths = [];
+                    for (const raw of rawPaths) {
+                        const resolved = path.resolve(repoRoot, String(raw || ""));
+                        if (!isWithin(repoRoot, resolved)) {
+                            res.setHeader("Content-Type", "application/json");
+                            res.statusCode = 400;
+                            res.end(JSON.stringify({ ok: false, error: "workload path out of repo" }));
+                            return;
+                        }
+                        try {
+                            await fs.stat(resolved);
+                        } catch (err) {
+                            res.setHeader("Content-Type", "application/json");
+                            res.statusCode = 400;
+                            res.end(JSON.stringify({ ok: false, error: `workload not found: ${raw}` }));
+                            return;
+                        }
+                        workloadPaths.push(resolved);
+                    }
+
+                    const outputName = sanitizeFileName(payload.output_name, "out.json");
+                    const outputPath = path.join(outputDir, outputName);
+                    const args = ["run", "--bin", "workloads_sim", "--"];
+                    for (const workloadPath of workloadPaths) {
+                        args.push("--workload", workloadPath);
+                    }
+                    args.push("--viz-json", outputPath);
+                    if (payload.fct_stats !== false) {
+                        args.push("--fct-stats");
+                    }
+                    if (payload.until_ms != null) {
+                        args.push("--until-ms", String(payload.until_ms));
+                    }
+
+                    const child = spawn("cargo", args, {
+                        cwd: repoRoot,
+                        env: process.env,
+                    });
+                    let stdout = "";
+                    let stderr = "";
+                    child.stdout.on("data", (chunk) => {
+                        stdout += chunk.toString();
+                    });
+                    child.stderr.on("data", (chunk) => {
+                        stderr += chunk.toString();
+                    });
+                    child.on("close", (code) => {
+                        res.setHeader("Content-Type", "application/json");
+                        res.statusCode = code === 0 ? 200 : 500;
+                        res.end(
+                            JSON.stringify({
+                                ok: code === 0,
+                                code,
+                                workload_paths: workloadPaths,
+                                output_path: outputPath,
+                                stdout,
+                                stderr,
+                            })
+                        );
+                    });
+                } catch (err) {
+                    res.setHeader("Content-Type", "application/json");
+                    res.statusCode = 500;
+                    res.end(JSON.stringify({ ok: false, error: err?.message || "server error" }));
+                }
+            });
         },
     };
 }

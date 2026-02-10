@@ -16,6 +16,22 @@
                 <button
                     type="button"
                     class="app-tab"
+                    :class="{ active: mode === 'sim' }"
+                    @click="setMode('sim')"
+                >
+                    仿真运行
+                </button>
+                <button
+                    type="button"
+                    class="app-tab"
+                    :class="{ active: mode === 'sim_multi' }"
+                    @click="setMode('sim_multi')"
+                >
+                    仿真运行（多租户）
+                </button>
+                <button
+                    type="button"
+                    class="app-tab"
                     :class="{ active: mode === 'neusight' }"
                     @click="setMode('neusight')"
                 >
@@ -54,6 +70,8 @@
             </button>
         </div>
 
+        <WorkloadSim v-else-if="mode === 'sim'" />
+        <WorkloadsSim v-else-if="mode === 'sim_multi'" />
         <WorkloadEditor v-else-if="mode === 'neusight'" generator="prediction" />
         <WorkloadEditor v-else generator="hook" />
     </div>
@@ -67,6 +85,8 @@ import TcpCard from "./components/TcpCard.vue";
 import TcpDetailsCard from "./components/TcpDetailsCard.vue";
 import CurrentEventPanel from "./components/CurrentEventPanel.vue";
 import WorkloadEditor from "./components/WorkloadEditor.vue";
+import WorkloadSim from "./components/WorkloadSim.vue";
+import WorkloadsSim from "./components/WorkloadsSim.vue";
 import { usePlayer } from "./composables/usePlayer";
 
 const player = usePlayer();
@@ -76,6 +96,10 @@ const showEvent = ref(true);
 const mode = ref(
     window.location.hash === "#editor"
         ? "neusight"
+        : window.location.hash === "#sim"
+        ? "sim"
+        : window.location.hash === "#sim-multi"
+        ? "sim_multi"
         : window.location.hash === "#hook"
         ? "hook"
         : "playback"
@@ -83,6 +107,14 @@ const mode = ref(
 const handleHash = () => {
     if (window.location.hash === "#editor") {
         mode.value = "neusight";
+        return;
+    }
+    if (window.location.hash === "#sim") {
+        mode.value = "sim";
+        return;
+    }
+    if (window.location.hash === "#sim-multi") {
+        mode.value = "sim_multi";
         return;
     }
     if (window.location.hash === "#hook") {
@@ -102,6 +134,14 @@ function setMode(next) {
     mode.value = next;
     if (next === "neusight") {
         window.location.hash = "editor";
+        return;
+    }
+    if (next === "sim") {
+        window.location.hash = "sim";
+        return;
+    }
+    if (next === "sim_multi") {
+        window.location.hash = "sim-multi";
         return;
     }
     if (next === "hook") {

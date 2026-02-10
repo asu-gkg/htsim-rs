@@ -71,6 +71,9 @@ body {
     background: rgba(15, 23, 42, 0.06);
     padding: 6px;
     border-radius: 999px;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
 .app-tab {
@@ -423,6 +426,12 @@ button:not(:disabled):hover {
 .row {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.row3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
 }
 
@@ -870,6 +879,9 @@ input[type="range"] {
         width: min(280px, 82vw);
     }
     .row {
+        grid-template-columns: 1fr;
+    }
+    .row3 {
         grid-template-columns: 1fr;
     }
     main {
