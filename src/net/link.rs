@@ -3,8 +3,13 @@
 //! 定义网络链路及其传输时延计算。
 
 use super::id::NodeId;
-use crate::queue::{mem_from_pkt, DropTailQueue, PacketQueue};
+use crate::queue::{DEFAULT_PKT_BYTES, PacketQueue, PriorityQueue};
 use crate::sim::SimTime;
+
+// Default to a very large buffer so links behave as "almost infinite"
+// unless experiments explicitly set a smaller capacity (e.g., to induce drops).
+const DEFAULT_LINK_QUEUE_PKTS: u64 = 1_000_000;
+const DEFAULT_LINK_QUEUE_BYTES: u64 = DEFAULT_LINK_QUEUE_PKTS * DEFAULT_PKT_BYTES;
 
 /// 网络链路
 #[derive(Debug)]
@@ -30,7 +35,7 @@ impl Link {
             bandwidth_bps,
             busy_until: SimTime::ZERO,
             ecn_threshold_bytes: None,
-            queue: Box::new(DropTailQueue::new(mem_from_pkt(8))),
+            queue: Box::new(PriorityQueue::new(DEFAULT_LINK_QUEUE_BYTES)),
         }
     }
 
@@ -41,8 +46,7 @@ impl Link {
             return SimTime(u64::MAX / 4);
         }
         let bits = (bytes as u128).saturating_mul(8);
-        let nanos = (bits.saturating_mul(1_000_000_000u128)
-            + (self.bandwidth_bps as u128 - 1))
+        let nanos = (bits.saturating_mul(1_000_000_000u128) + (self.bandwidth_bps as u128 - 1))
             / self.bandwidth_bps as u128;
         SimTime(nanos.min(u64::MAX as u128) as u64)
     }

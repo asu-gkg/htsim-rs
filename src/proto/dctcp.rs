@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use crate::net::{with_dctcp_stack, DctcpSegment, Ecn, NetApi, NodeId, Transport};
+use crate::net::{DctcpSegment, Ecn, NetApi, NodeId, Transport, with_dctcp_stack};
 use crate::sim::{Event, SimTime, Simulator, World};
 use crate::viz::VizCwndReason;
 
@@ -214,15 +214,23 @@ impl DctcpConn {
 
     fn make_data_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
-            DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone()),
-            DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst),
+            DctcpRoutingMode::Preset => {
+                net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone())
+            }
+            DctcpRoutingMode::Dynamic => {
+                net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst)
+            }
         }
     }
 
     fn make_ack_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
-            DctcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone()),
-            DctcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src),
+            DctcpRoutingMode::Preset => {
+                net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone())
+            }
+            DctcpRoutingMode::Dynamic => {
+                net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src)
+            }
         }
     }
 
@@ -322,11 +330,7 @@ impl DctcpStack {
             conn.start_at = Some(sim.now());
         }
 
-        let inflight_bytes: u64 = conn
-            .inflight
-            .values()
-            .map(|s| s.len as u64)
-            .sum();
+        let inflight_bytes: u64 = conn.inflight.values().map(|s| s.len as u64).sum();
         let mut avail = conn.cwnd_bytes.saturating_sub(inflight_bytes);
 
         while avail > 0 && conn.next_seq < conn.total_bytes {
@@ -624,7 +628,7 @@ impl Event for DctcpRto {
             if conn.earliest_unacked_seq() != Some(seq) {
                 return;
             }
-            let Some(sent) = conn.inflight.get(&seq).cloned() else {
+            if !conn.inflight.contains_key(&seq) {
                 return;
             };
 
@@ -648,16 +652,13 @@ impl Event for DctcpRto {
                 None,
             );
 
-            let mut pkt = conn.make_data_packet(net);
-            pkt.size_bytes = conn.cfg.mss;
-            pkt.transport = Transport::Dctcp(DctcpSegment::Data { seq, len: sent.len });
-            pkt.ecn = Ecn::Ect0;
-            net.forward_from(conn.src, pkt, sim);
-
-            sim.schedule(
-                SimTime(sim.now().0.saturating_add(conn.rto.0)),
-                DctcpRto { conn_id, seq },
-            );
+            // Same rationale as TCP: restart from last ACKed byte to avoid
+            // tail-loss recovery degenerating into one segment per RTO.
+            conn.next_seq = conn.last_acked;
+            conn.inflight.clear();
+            let id = conn.id;
+            let _ = conn;
+            dctcp.send_data_if_possible(id, sim, net);
         });
     }
 }

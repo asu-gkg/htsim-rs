@@ -33,10 +33,7 @@ impl Default for DumbbellOpts {
 ///
 /// 拓扑结构：h0 <-> s0 <-> s1 <-> h1
 /// 返回：(源节点, 目标节点, 路由路径)
-pub fn build_dumbbell(
-    world: &mut NetWorld,
-    opts: &DumbbellOpts,
-) -> (NodeId, NodeId, Vec<NodeId>) {
+pub fn build_dumbbell(world: &mut NetWorld, opts: &DumbbellOpts) -> (NodeId, NodeId, Vec<NodeId>) {
     let h0 = world.net.add_host("h0");
     let h1 = world.net.add_host("h1");
     let s0 = world.net.add_switch("s0");

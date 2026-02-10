@@ -6,15 +6,15 @@ use std::collections::HashMap;
 
 use super::deliver_packet::DeliverPacket;
 use super::id::{LinkId, NodeId};
-use super::link_ready::LinkReady;
 use super::link::Link;
+use super::link_ready::LinkReady;
 use super::node::{Host, Node, Switch};
 use super::packet::Packet;
-use super::stats::Stats;
 use super::routing::RoutingTable;
+use super::stats::Stats;
 use crate::proto::dctcp::DctcpStack;
 use crate::proto::tcp::TcpStack;
-use crate::queue::DropTailQueue;
+use crate::queue::PriorityQueue;
 use crate::sim::{SimTime, Simulator};
 use crate::viz::{VizLogger, VizNodeKind};
 use tracing::{debug, trace};
@@ -90,7 +90,8 @@ impl Network {
     pub fn add_switch(&mut self, name: impl Into<String>) -> NodeId {
         let name = name.into();
         let id = NodeId(self.nodes.len());
-        self.nodes.push(Some(Box::new(Switch::new(id, name.clone()))));
+        self.nodes
+            .push(Some(Box::new(Switch::new(id, name.clone()))));
         self.node_names.push(name);
         self.node_kinds.push(VizNodeKind::Switch);
         self.adj.push(Vec::new());
@@ -123,13 +124,43 @@ impl Network {
             .edges
             .get(&(from, to))
             .unwrap_or_else(|| panic!("no link from {:?} to {:?}", from, to));
-        self.links[link_id.0].queue = Box::new(DropTailQueue::new(capacity_bytes));
+        self.links[link_id.0].queue = Box::new(PriorityQueue::new(capacity_bytes));
     }
 
     /// 设置所有链路的队列容量（字节）。
     pub fn set_all_link_queue_capacity_bytes(&mut self, capacity_bytes: u64) {
         for link in &mut self.links {
-            link.queue = Box::new(DropTailQueue::new(capacity_bytes));
+            link.queue = Box::new(PriorityQueue::new(capacity_bytes));
+        }
+    }
+
+    /// 设置所有 Host 节点“出方向”链路的队列容量（字节）。
+    ///
+    /// 说明：链路队列建模的是 *from* 节点的 egress buffer。对 Host 来说，
+    /// 过小的队列会把“本地发送缓存不足”误建模成网络丢包，导致 TCP 进入
+    /// 一段时间的 RTO 退化（one-segment-per-RTO）并夸大 FCT。
+    pub fn set_host_egress_queue_capacity_bytes(&mut self, capacity_bytes: u64) {
+        for link in &mut self.links {
+            if self
+                .node_kinds
+                .get(link.from.0)
+                .is_some_and(|k| matches!(*k, VizNodeKind::Host))
+            {
+                link.queue = Box::new(PriorityQueue::new(capacity_bytes));
+            }
+        }
+    }
+
+    /// 设置所有 Switch 节点“出方向”链路的队列容量（字节）。
+    pub fn set_switch_egress_queue_capacity_bytes(&mut self, capacity_bytes: u64) {
+        for link in &mut self.links {
+            if self
+                .node_kinds
+                .get(link.from.0)
+                .is_some_and(|k| matches!(*k, VizNodeKind::Switch))
+            {
+                link.queue = Box::new(PriorityQueue::new(capacity_bytes));
+            }
         }
     }
 
@@ -164,7 +195,10 @@ impl Network {
             path.push(nh);
             cur = nh;
             if path.len() > max_hops {
-                panic!("routing loop from {:?} to {:?} (flow_id={})", src, dst, flow_id);
+                panic!(
+                    "routing loop from {:?} to {:?} (flow_id={})",
+                    src, dst, flow_id
+                );
             }
         }
         path
@@ -209,7 +243,7 @@ impl Network {
         debug!("📬 将数据包交付给节点处理");
 
         self.viz_arrive_node(sim.now(), &pkt, to);
-        
+
         // 暂时把节点取出来，避免 &mut self 与 &mut node 的重叠借用。
         let mut node = self.nodes[to.0].take().expect("node exists");
         let node_name = self
@@ -221,9 +255,9 @@ impl Network {
         trace!(node_name = %node_name, "取出节点");
 
         self.viz_node_rx(sim.now(), &pkt, to, node_kind, &node_name);
-        
+
         node.on_packet(pkt, sim, self);
-        
+
         trace!("节点处理完成，放回节点");
         self.nodes[to.0] = Some(node);
     }
@@ -253,7 +287,7 @@ impl Network {
         };
 
         self.viz_node_forward(sim.now(), &pkt, from, to);
-        
+
         let link_id = *self
             .edges
             .get(&(from, to))
@@ -349,7 +383,13 @@ impl Network {
         let (from, to, latency, bandwidth_bps, pkt_opt) = {
             let link = &mut self.links[link_id.0];
             let pkt_opt = link.queue.dequeue();
-            (link.from, link.to, link.latency, link.bandwidth_bps, pkt_opt)
+            (
+                link.from,
+                link.to,
+                link.latency,
+                link.bandwidth_bps,
+                pkt_opt,
+            )
         };
 
         let Some(pkt) = pkt_opt else {
@@ -383,9 +423,14 @@ impl Network {
         );
 
         // 到达事件（传播时延 + 序列化时延）
-        sim.schedule(arrive, DeliverPacket { to, pkt: pkt.advance() });
+        sim.schedule(
+            arrive,
+            DeliverPacket {
+                to,
+                pkt: pkt.advance(),
+            },
+        );
         // depart 时刻再次触发，继续出队
         sim.schedule(depart, LinkReady { link_id });
     }
-
 }

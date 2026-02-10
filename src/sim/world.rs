@@ -2,8 +2,8 @@
 //!
 //! 定义仿真世界接口。
 
-use std::any::Any;
 use super::simulator::Simulator;
+use std::any::Any;
 
 /// 仿真世界：由业务层实现（例如网络拓扑/统计等）。
 pub trait World: Any {

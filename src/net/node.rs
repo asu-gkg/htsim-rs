@@ -54,7 +54,7 @@ impl Node for Host {
             hops_taken = pkt.hops_taken,
             "数据包信息"
         );
-        
+
         if self.id != pkt.dst {
             debug!("未到达目的地，继续转发");
             net.forward_from(self.id, pkt, sim);
@@ -99,7 +99,7 @@ impl Node for Switch {
             hops_taken = pkt.hops_taken,
             "数据包信息"
         );
-        
+
         if self.id != pkt.dst {
             debug!("未到达目的地，继续转发");
             net.forward_from(self.id, pkt, sim);

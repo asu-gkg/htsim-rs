@@ -1,6 +1,6 @@
 use htsim_rs::net::{NetWorld, NodeId};
 use htsim_rs::sim::{Event, SimTime, Simulator, World};
-use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
+use htsim_rs::topo::fat_tree::{FatTreeOpts, build_fat_tree};
 
 #[derive(Debug)]
 struct InjectFlowDynamic {

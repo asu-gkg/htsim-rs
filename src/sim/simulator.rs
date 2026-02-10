@@ -2,11 +2,11 @@
 //!
 //! 定义事件驱动仿真器，维护当前时间与事件队列。
 
-use std::collections::BinaryHeap;
-use super::time::SimTime;
-use super::scheduled_event::ScheduledEvent;
 use super::event::Event;
+use super::scheduled_event::ScheduledEvent;
+use super::time::SimTime;
 use super::world::World;
+use std::collections::BinaryHeap;
 use tracing::{debug, info, trace};
 
 /// 事件驱动仿真器：维护当前时间与事件队列。
@@ -28,14 +28,14 @@ impl Simulator {
     pub fn schedule<E: Event>(&mut self, at: SimTime, ev: E) {
         let seq = self.next_seq;
         trace!(now = ?self.now, seq, "调度事件");
-        
+
         self.next_seq = self.next_seq.wrapping_add(1);
         self.q.push(ScheduledEvent {
             at,
             seq,
             ev: Box::new(ev),
         });
-        
+
         debug!(queue_size = self.q.len(), "事件已加入队列");
     }
 
@@ -58,12 +58,12 @@ impl Simulator {
     pub fn run(&mut self, world: &mut dyn World) {
         info!("▶️  开始运行仿真");
         debug!(now = ?self.now, queue_size = self.q.len(), "初始状态");
-        
+
         let mut event_count = 0;
         while let Some(item) = self.q.pop() {
             event_count += 1;
             self.now = item.at;
-            
+
             debug!(
                 event_num = event_count,
                 now = ?self.now,
@@ -72,11 +72,11 @@ impl Simulator {
                 remaining_queue = self.q.len(),
                 "执行事件"
             );
-            
+
             item.ev.execute(self, world);
             world.on_tick(self);
         }
-        
+
         info!(
             total_events = event_count,
             final_time = ?self.now,

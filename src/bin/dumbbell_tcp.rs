@@ -6,12 +6,15 @@ use clap::Parser;
 use htsim_rs::net::NetWorld;
 use htsim_rs::proto::tcp::{TcpConfig, TcpConn, TcpStart};
 use htsim_rs::sim::{SimTime, Simulator};
-use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
+use htsim_rs::topo::dumbbell::{DumbbellOpts, build_dumbbell};
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "dumbbell-tcp", about = "Dumbbell 拓扑仿真：h0->h1 单流 TCP（简化 Reno）")]
+#[command(
+    name = "dumbbell-tcp",
+    about = "Dumbbell 拓扑仿真：h0->h1 单流 TCP（简化 Reno）"
+)]
 struct Args {
     /// 要发送的应用数据量（字节）
     #[arg(long, default_value_t = 10_000_000)]

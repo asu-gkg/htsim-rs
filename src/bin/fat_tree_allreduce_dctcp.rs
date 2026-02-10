@@ -5,12 +5,15 @@ use htsim_rs::cc::ring::{self, RingAllreduceConfig, RingTransport, RoutingMode a
 use htsim_rs::net::{EcmpHashMode, NetWorld, NodeId};
 use htsim_rs::proto::dctcp::DctcpConfig;
 use htsim_rs::sim::{SimTime, Simulator};
-use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
+use htsim_rs::topo::fat_tree::{FatTreeOpts, build_fat_tree};
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "fat-tree-allreduce-dctcp", about = "Fat-tree ring allreduce with DCTCP")]
+#[command(
+    name = "fat-tree-allreduce-dctcp",
+    about = "Fat-tree ring allreduce with DCTCP"
+)]
 struct Args {
     #[arg(long, default_value_t = 4)]
     k: usize,
@@ -126,15 +129,13 @@ impl RingTransport for DctcpRingTransport {
                     self.cfg.clone(),
                 )
             }
-            CcRoutingMode::PerPacket => {
-                htsim_rs::proto::dctcp::DctcpConn::new_dynamic(
-                    flow_id,
-                    src,
-                    dst,
-                    chunk_bytes,
-                    self.cfg.clone(),
-                )
-            }
+            CcRoutingMode::PerPacket => htsim_rs::proto::dctcp::DctcpConn::new_dynamic(
+                flow_id,
+                src,
+                dst,
+                chunk_bytes,
+                self.cfg.clone(),
+            ),
         };
         if Some(flow_id) == self.probe_flow_id {
             conn.enable_cwnd_log();
@@ -175,7 +176,11 @@ fn main() {
 
     let ranks = args.ranks.unwrap_or(topo.hosts.len());
     if ranks == 0 || ranks > topo.hosts.len() {
-        eprintln!("invalid ranks: {} (hosts available: {})", ranks, topo.hosts.len());
+        eprintln!(
+            "invalid ranks: {} (hosts available: {})",
+            ranks,
+            topo.hosts.len()
+        );
         return;
     }
 
@@ -258,12 +263,8 @@ fn main() {
 
     let stats = handle.stats();
     let start = stats.start_at.unwrap_or(sim.now());
-    let fct_ns = stats
-        .done_at
-        .map(|d| d.0.saturating_sub(start.0));
-    let reduce_ns = stats
-        .reduce_done_at
-        .map(|d| d.0.saturating_sub(start.0));
+    let fct_ns = stats.done_at.map(|d| d.0.saturating_sub(start.0));
+    let reduce_ns = stats.reduce_done_at.map(|d| d.0.saturating_sub(start.0));
 
     if !args.quiet {
         println!(
@@ -296,7 +297,8 @@ fn main() {
         if let Some(conn_id) = probe_flow_id {
             if let Some(c) = world.net.dctcp.get(conn_id) {
                 if let Some(samples) = c.cwnd_samples() {
-                    let mut out = String::from("t_ns,cwnd_bytes,ssthresh_bytes,alpha,acked_bytes\n");
+                    let mut out =
+                        String::from("t_ns,cwnd_bytes,ssthresh_bytes,alpha,acked_bytes\n");
                     for s in samples {
                         out.push_str(&format!(
                             "{},{},{},{:.6},{}\n",

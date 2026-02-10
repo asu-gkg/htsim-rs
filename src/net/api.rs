@@ -8,7 +8,13 @@ use super::{NodeId, Packet};
 /// Minimal network API for protocol stacks.
 pub trait NetApi {
     fn make_packet(&mut self, flow_id: u64, size_bytes: u32, route: Vec<NodeId>) -> Packet;
-    fn make_packet_dynamic(&mut self, flow_id: u64, size_bytes: u32, src: NodeId, dst: NodeId) -> Packet;
+    fn make_packet_dynamic(
+        &mut self,
+        flow_id: u64,
+        size_bytes: u32,
+        src: NodeId,
+        dst: NodeId,
+    ) -> Packet;
     fn forward_from(&mut self, from: NodeId, pkt: Packet, sim: &mut Simulator);
 
     fn viz_tcp_send_data(&mut self, t_ns: u64, conn_id: u64, seq: u64, len: u32, retrans: bool);
@@ -35,7 +41,13 @@ impl NetApi for super::Network {
         super::Network::make_packet(self, flow_id, size_bytes, route)
     }
 
-    fn make_packet_dynamic(&mut self, flow_id: u64, size_bytes: u32, src: NodeId, dst: NodeId) -> Packet {
+    fn make_packet_dynamic(
+        &mut self,
+        flow_id: u64,
+        size_bytes: u32,
+        src: NodeId,
+        dst: NodeId,
+    ) -> Packet {
         super::Network::make_packet_dynamic(self, flow_id, size_bytes, src, dst)
     }
 

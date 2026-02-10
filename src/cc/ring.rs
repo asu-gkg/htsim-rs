@@ -200,13 +200,7 @@ impl Event for FlowDone {
         }
 
         if start_next {
-            sim.schedule(
-                sim.now(),
-                StartStep {
-                    state,
-                    transport,
-                },
-            );
+            sim.schedule(sim.now(), StartStep { state, transport });
         }
     }
 }
@@ -251,10 +245,7 @@ impl RingAllreduceHandle {
 }
 
 /// Schedule a ring allreduce at SimTime::ZERO and return a handle for stats.
-pub fn start_ring_allreduce(
-    sim: &mut Simulator,
-    cfg: RingAllreduceConfig,
-) -> RingAllreduceHandle {
+pub fn start_ring_allreduce(sim: &mut Simulator, cfg: RingAllreduceConfig) -> RingAllreduceHandle {
     start_ring_allreduce_at(sim, cfg, SimTime::ZERO)
 }
 

@@ -5,8 +5,10 @@
 use crate::net::Packet;
 
 mod drop_tail;
+mod priority;
 
 pub use drop_tail::DropTailQueue;
+pub use priority::PriorityQueue;
 
 pub const DEFAULT_PKT_BYTES: u64 = 1500;
 

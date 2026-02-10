@@ -3,7 +3,7 @@
   "topology": {
     "kind": "fat_tree",
     "k": 4,
-    "link_gbps": 100,
+    "link_gbps": 10,
     "link_latency_us": 2
   },
   "hosts": [

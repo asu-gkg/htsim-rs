@@ -102,10 +102,18 @@ impl RoutingTable {
     }
 
     /// 基于任意 key 的稳定 ECMP 选择。
-    pub fn pick_ecmp_with_key(&self, from: NodeId, dst: NodeId, key: u64, cands: &[NodeId]) -> NodeId {
+    pub fn pick_ecmp_with_key(
+        &self,
+        from: NodeId,
+        dst: NodeId,
+        key: u64,
+        cands: &[NodeId],
+    ) -> NodeId {
         debug_assert!(!cands.is_empty());
         let h = mix64(
-            key ^ (from.0 as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ (dst.0 as u64) ^ self.hash_salt,
+            key ^ (from.0 as u64).wrapping_mul(0x9E3779B97F4A7C15)
+                ^ (dst.0 as u64)
+                ^ self.hash_salt,
         );
         let idx = (h as usize) % cands.len();
         cands[idx]

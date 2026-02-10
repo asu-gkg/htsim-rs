@@ -5,7 +5,7 @@
 use clap::Parser;
 use htsim_rs::net::{NetWorld, NodeId};
 use htsim_rs::sim::{Event, SimTime, Simulator, World};
-use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
+use htsim_rs::topo::dumbbell::{DumbbellOpts, build_dumbbell};
 
 /// 流量注入事件
 ///

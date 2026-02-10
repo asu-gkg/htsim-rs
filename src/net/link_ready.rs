@@ -20,4 +20,3 @@ impl Event for LinkReady {
         w.net.on_link_ready(link_id, sim);
     }
 }
-

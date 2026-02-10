@@ -2,9 +2,9 @@
 //!
 //! 定义调度事件结构及其优先级比较。
 
-use std::cmp::Ordering;
-use super::time::SimTime;
 use super::event::Event;
+use super::time::SimTime;
+use std::cmp::Ordering;
 
 /// 调度事件，包含执行时间、序列号和事件对象。
 pub struct ScheduledEvent {

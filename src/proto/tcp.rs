@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use crate::net::{with_tcp_stack, NetApi, NodeId, TcpSegment, Transport};
+use crate::net::{NetApi, NodeId, TcpSegment, Transport, with_tcp_stack};
 use crate::sim::{Event, SimTime, Simulator, World};
 use crate::viz::VizCwndReason;
 
@@ -20,7 +20,7 @@ pub struct TcpConfig {
     pub init_cwnd_bytes: u64,
     /// 初始 ssthresh（字节）
     pub init_ssthresh_bytes: u64,
-    /// 初始 RTO
+    /// 初始 RTO/
     pub init_rto: SimTime,
     /// 最小 RTO
     pub min_rto: SimTime,
@@ -40,8 +40,8 @@ impl Default for TcpConfig {
             ack_bytes: 64,
             init_cwnd_bytes: (mss as u64).saturating_mul(10),
             init_ssthresh_bytes: (mss as u64).saturating_mul(1_000),
-            init_rto: SimTime::from_millis(200),  // 200ms，更接近真实 TCP
-            min_rto: SimTime::from_millis(1),     // 1ms 最小 RTO
+            init_rto: SimTime::from_millis(200), // 200ms，更接近真实 TCP
+            min_rto: SimTime::from_millis(1),    // 1ms 最小 RTO
             max_rto: SimTime::from_millis(60000), // 60 秒最大 RTO
             handshake: false,
             app_limited_pps: None,
@@ -248,15 +248,23 @@ impl TcpConn {
 
     fn make_data_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
-            TcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone()),
-            TcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst),
+            TcpRoutingMode::Preset => {
+                net.make_packet(self.id, self.cfg.mss, self.fwd_route.clone())
+            }
+            TcpRoutingMode::Dynamic => {
+                net.make_packet_dynamic(self.id, self.cfg.mss, self.src, self.dst)
+            }
         }
     }
 
     fn make_ack_packet(&self, net: &mut dyn NetApi) -> crate::net::Packet {
         match self.routing_mode {
-            TcpRoutingMode::Preset => net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone()),
-            TcpRoutingMode::Dynamic => net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src),
+            TcpRoutingMode::Preset => {
+                net.make_packet(self.id, self.cfg.ack_bytes, self.rev_route.clone())
+            }
+            TcpRoutingMode::Dynamic => {
+                net.make_packet_dynamic(self.id, self.cfg.ack_bytes, self.dst, self.src)
+            }
         }
     }
 
@@ -310,7 +318,13 @@ impl TcpConn {
         self.rto_deadline = Some(deadline);
         self.rto_token = self.rto_token.wrapping_add(1);
         let token = self.rto_token;
-        sim.schedule(deadline, TcpRto { conn_id: self.id, token });
+        sim.schedule(
+            deadline,
+            TcpRto {
+                conn_id: self.id,
+                token,
+            },
+        );
     }
 
     fn ensure_rto(&mut self, sim: &mut Simulator) {
@@ -594,9 +608,8 @@ impl TcpStack {
                     if conn.in_fast_recovery {
                         if ack >= conn.recover {
                             let flightsize = conn.next_seq.saturating_sub(ack);
-                            conn.cwnd_bytes = conn
-                                .ssthresh_bytes
-                                .min(flightsize.saturating_add(mss));
+                            conn.cwnd_bytes =
+                                conn.ssthresh_bytes.min(flightsize.saturating_add(mss));
                             conn.in_fast_recovery = false;
                         } else {
                             let new_data = ack.saturating_sub(prev_acked);
@@ -607,7 +620,11 @@ impl TcpStack {
                             }
                             conn.cwnd_bytes = conn.cwnd_bytes.saturating_add(mss);
                             if let Some(seq0) = conn.earliest_unacked_seq() {
-                                let len = conn.inflight.get(&seq0).map(|s| s.len).unwrap_or(conn.cfg.mss);
+                                let len = conn
+                                    .inflight
+                                    .get(&seq0)
+                                    .map(|s| s.len)
+                                    .unwrap_or(conn.cfg.mss);
                                 let mut pkt = conn.make_data_packet(net);
                                 pkt.size_bytes = conn.cfg.mss;
                                 pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len });
@@ -707,7 +724,11 @@ impl TcpStack {
                         }
                         conn.ssthresh_bytes = (conn.cwnd_bytes / 2).max(2 * mss);
                         if let Some(seq0) = conn.earliest_unacked_seq() {
-                            let len = conn.inflight.get(&seq0).map(|s| s.len).unwrap_or(conn.cfg.mss);
+                            let len = conn
+                                .inflight
+                                .get(&seq0)
+                                .map(|s| s.len)
+                                .unwrap_or(conn.cfg.mss);
                             let mut pkt = conn.make_data_packet(net);
                             pkt.size_bytes = conn.cfg.mss;
                             pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len });
@@ -827,9 +848,6 @@ impl Event for TcpRto {
             let Some(seq0) = conn.earliest_unacked_seq() else {
                 return;
             };
-            let Some(sent) = conn.inflight.get(&seq0).cloned() else {
-                return;
-            };
 
             // 先记录 RTO 事件（即将触发重传）
             net.viz_tcp_rto(sim.now().0, conn_id, seq0);
@@ -847,7 +865,8 @@ impl Event for TcpRto {
             conn.cwnd_bytes = mss;
             conn.dup_acks = 0;
             conn.in_fast_recovery = false;
-            conn.recover = conn.next_seq;
+            // Allow future fast retransmits; RTO recovery resets the flight anyway.
+            conn.recover = conn.last_acked;
             let rto = conn.rto.0.saturating_mul(2);
             let rto = rto.max(conn.cfg.min_rto.0).min(conn.cfg.max_rto.0);
             conn.rto = SimTime(rto);
@@ -866,18 +885,13 @@ impl Event for TcpRto {
                 None,
             );
 
-            // 重传 earliest unacked
-            let mut pkt = conn.make_data_packet(net);
-            pkt.size_bytes = conn.cfg.mss;
-            pkt.transport = Transport::Tcp(TcpSegment::Data { seq: seq0, len: sent.len });
-            net.viz_tcp_send_data(sim.now().0, conn_id, seq0, sent.len, true);
-            net.forward_from(conn.src, pkt, sim);
-            if let Some(sent) = conn.inflight.get_mut(&seq0) {
-                sent.sent_at = sim.now();
-                sent.retransmitted = true;
-            }
-
-            conn.schedule_rto(sim);
+            // RTO typically indicates severe loss; restarting from the last ACKed byte
+            // avoids "one-segment-per-RTO" tail loss recovery.
+            conn.next_seq = conn.last_acked;
+            conn.inflight.clear();
+            let id = conn.id;
+            let _ = conn;
+            tcp.send_data_if_possible(id, sim, net);
         });
     }
 }

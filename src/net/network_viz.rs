@@ -63,7 +63,14 @@ impl Network {
         });
     }
 
-    pub(crate) fn viz_tcp_send_data(&mut self, t_ns: u64, conn_id: u64, seq: u64, len: u32, retrans: bool) {
+    pub(crate) fn viz_tcp_send_data(
+        &mut self,
+        t_ns: u64,
+        conn_id: u64,
+        seq: u64,
+        len: u32,
+        retrans: bool,
+    ) {
         let retrans = if retrans { Some(true) } else { None };
         self.viz_push(VizEvent {
             t_ns,

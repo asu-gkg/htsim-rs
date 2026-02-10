@@ -5,11 +5,14 @@
 use clap::Parser;
 use htsim_rs::net::{NetWorld, NodeId};
 use htsim_rs::sim::{Event, SimTime, Simulator, World};
-use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
+use htsim_rs::topo::dumbbell::{DumbbellOpts, build_dumbbell};
 use tracing::{debug, info, trace};
 
 #[derive(Debug, Parser)]
-#[command(name = "trace-single-packet", about = "单包追踪模式：只发送一个数据包，打印详细的执行流程")]
+#[command(
+    name = "trace-single-packet",
+    about = "单包追踪模式：只发送一个数据包，打印详细的执行流程"
+)]
 struct Args {
     #[arg(long, default_value_t = 1500)]
     pkt_bytes: u32,
@@ -40,14 +43,14 @@ impl Event for TraceSinglePacket {
             route,
             pkt_bytes,
         } = *self;
-        
+
         info!("📦 创建并发送单个数据包");
         debug!(
             now = ?sim.now(),
             route = ?route,
             "事件参数"
         );
-        
+
         let w = world
             .as_any_mut()
             .downcast_mut::<NetWorld>()
@@ -60,10 +63,10 @@ impl Event for TraceSinglePacket {
             hops_taken = pkt.hops_taken,
             "创建数据包"
         );
-        
+
         // 从 src 直接发送到下一跳（forward 会 schedule DeliverPacket）
         w.net.forward_from(src, pkt, sim);
-        
+
         debug!("数据包已从源节点发出，等待链路传输");
     }
 }
@@ -98,12 +101,12 @@ fn main() {
     info!("╔════════════════════════════════════════════════════════════════════════════════╗");
     info!("║                    单包追踪模式启动                                            ║");
     info!("╚════════════════════════════════════════════════════════════════════════════════╝");
-    
+
     let (src, _dst, route) = build_dumbbell(&mut world, &opts);
-    
+
     info!("构建 dumbbell 拓扑: h0 (src) -> s0 -> s1 -> h1 (dst)");
     debug!(route = ?route, "路径信息");
-    
+
     // 注入单个数据包
     info!("在 t=0 调度 TraceSinglePacket 事件");
     sim.schedule(
@@ -118,7 +121,7 @@ fn main() {
 
     info!("开始运行仿真直到所有事件完成");
     sim.run(&mut world);
-    
+
     info!("╔════════════════════════════════════════════════════════════════════════════════╗");
     info!("║                    仿真完成                                                    ║");
     info!("╚════════════════════════════════════════════════════════════════════════════════╝");

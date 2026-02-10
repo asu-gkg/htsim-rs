@@ -6,12 +6,15 @@ use clap::Parser;
 use htsim_rs::net::NetWorld;
 use htsim_rs::proto::dctcp::{DctcpConfig, DctcpConn, DctcpStart};
 use htsim_rs::sim::{SimTime, Simulator};
-use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
+use htsim_rs::topo::dumbbell::{DumbbellOpts, build_dumbbell};
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "dumbbell-dctcp", about = "Dumbbell 拓扑仿真：h0->h1 单流 DCTCP（简化）")]
+#[command(
+    name = "dumbbell-dctcp",
+    about = "Dumbbell 拓扑仿真：h0->h1 单流 DCTCP（简化）"
+)]
 struct Args {
     /// 要发送的应用数据量（字节）
     #[arg(long, default_value_t = 10_000_000)]
@@ -80,14 +83,12 @@ fn main() {
     let args = Args::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            if args.quiet {
-                tracing_subscriber::EnvFilter::new("off")
-            } else {
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-            },
-        )
+        .with_env_filter(if args.quiet {
+            tracing_subscriber::EnvFilter::new("off")
+        } else {
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        })
         .with_file(true)
         .with_line_number(true)
         .with_target(true)

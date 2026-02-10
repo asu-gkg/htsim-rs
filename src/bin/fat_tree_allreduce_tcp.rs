@@ -5,12 +5,15 @@ use htsim_rs::cc::ring::{self, RingAllreduceConfig, RingTransport, RoutingMode a
 use htsim_rs::net::{EcmpHashMode, NetWorld, NodeId};
 use htsim_rs::proto::tcp::TcpConfig;
 use htsim_rs::sim::{SimTime, Simulator};
-use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
+use htsim_rs::topo::fat_tree::{FatTreeOpts, build_fat_tree};
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "fat-tree-allreduce-tcp", about = "Fat-tree ring allreduce with TCP")]
+#[command(
+    name = "fat-tree-allreduce-tcp",
+    about = "Fat-tree ring allreduce with TCP"
+)]
 struct Args {
     #[arg(long, default_value_t = 4)]
     k: usize,
@@ -121,15 +124,13 @@ impl RingTransport for TcpRingTransport {
                     self.cfg.clone(),
                 )
             }
-            CcRoutingMode::PerPacket => {
-                htsim_rs::proto::tcp::TcpConn::new_dynamic(
-                    flow_id,
-                    src,
-                    dst,
-                    chunk_bytes,
-                    self.cfg.clone(),
-                )
-            }
+            CcRoutingMode::PerPacket => htsim_rs::proto::tcp::TcpConn::new_dynamic(
+                flow_id,
+                src,
+                dst,
+                chunk_bytes,
+                self.cfg.clone(),
+            ),
         };
         let done_cb: htsim_rs::proto::tcp::TcpDoneCallback = Box::new(move |_, now, sim| {
             done(now, sim);
@@ -185,7 +186,11 @@ fn main() {
 
     let ranks = args.ranks.unwrap_or(topo.hosts.len());
     if ranks == 0 || ranks > topo.hosts.len() {
-        eprintln!("invalid ranks: {} (hosts available: {})", ranks, topo.hosts.len());
+        eprintln!(
+            "invalid ranks: {} (hosts available: {})",
+            ranks,
+            topo.hosts.len()
+        );
         return;
     }
 
@@ -245,12 +250,8 @@ fn main() {
 
     let stats = handle.stats();
     let start = stats.start_at.unwrap_or(sim.now());
-    let fct_ns = stats
-        .done_at
-        .map(|d| d.0.saturating_sub(start.0));
-    let reduce_ns = stats
-        .reduce_done_at
-        .map(|d| d.0.saturating_sub(start.0));
+    let fct_ns = stats.done_at.map(|d| d.0.saturating_sub(start.0));
+    let reduce_ns = stats.reduce_done_at.map(|d| d.0.saturating_sub(start.0));
     let p99_ns = percentile_ns(&stats.flow_fct_ns, 0.99);
     let max_flow_ns = stats.flow_fct_ns.iter().copied().max();
     let slow_threshold_ns = SimTime::from_secs(1).0;
@@ -266,9 +267,7 @@ fn main() {
     };
     let makespan_ms = fct_ns.map(|ns| ns as f64 / 1_000_000.0).unwrap_or(0.0);
     let p99_ms = p99_ns.map(|ns| ns as f64 / 1_000_000.0).unwrap_or(0.0);
-    let max_flow_ms = max_flow_ns
-        .map(|ns| ns as f64 / 1_000_000.0)
-        .unwrap_or(0.0);
+    let max_flow_ms = max_flow_ns.map(|ns| ns as f64 / 1_000_000.0).unwrap_or(0.0);
 
     if !args.quiet {
         println!(

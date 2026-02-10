@@ -8,16 +8,21 @@ use htsim_rs::sim::{
     HostSpec, RankStepKind, RankStepSpec, RoutingMode, SendRecvDirection, SimTime, Simulator,
     StepSpec, TopologySpec, TransportProtocol, WorkloadDefaults, WorkloadSpec,
 };
-use htsim_rs::topo::dumbbell::{build_dumbbell, DumbbellOpts};
-use htsim_rs::topo::fat_tree::{build_fat_tree, FatTreeOpts};
+use htsim_rs::topo::dumbbell::{DumbbellOpts, build_dumbbell};
+use htsim_rs::topo::fat_tree::{FatTreeOpts, build_fat_tree};
 use htsim_rs::viz::{VizEvent, VizEventKind, VizLogger};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+const DEFAULT_HOST_EGRESS_QUEUE_BYTES: u64 = 16_u64 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Parser)]
-#[command(name = "workload-sim", about = "Run workload.json on htsim-rs network simulator")]
+#[command(
+    name = "workload-sim",
+    about = "Run workload.json on htsim-rs network simulator"
+)]
 struct Args {
     /// Path to workload.json
     #[arg(long)]
@@ -43,13 +48,21 @@ struct Args {
     #[arg(long)]
     fct_stats: bool,
 
-    /// Override all link queue capacity in bytes
+    /// Override switch egress queue capacity in bytes
     #[arg(long)]
     queue_bytes: Option<u64>,
 
-    /// Override all link queue capacity in packets (1500B each)
+    /// Override switch egress queue capacity in packets (1500B each)
     #[arg(long)]
     queue_pkts: Option<u64>,
+
+    /// Override host egress queue capacity in bytes (defaults to a large value)
+    #[arg(long)]
+    host_queue_bytes: Option<u64>,
+
+    /// Override host egress queue capacity in packets (1500B each)
+    #[arg(long)]
+    host_queue_pkts: Option<u64>,
 }
 
 struct AllreduceRecord {
@@ -141,13 +154,9 @@ impl RingTransport for TcpRingTransport {
                 let route = world.net.route_ecmp_path(src, dst, flow_id);
                 TcpConn::new(flow_id, src, dst, route, chunk_bytes, self.cfg.clone())
             }
-            CcRoutingMode::PerPacket => TcpConn::new_dynamic(
-                flow_id,
-                src,
-                dst,
-                chunk_bytes,
-                self.cfg.clone(),
-            ),
+            CcRoutingMode::PerPacket => {
+                TcpConn::new_dynamic(flow_id, src, dst, chunk_bytes, self.cfg.clone())
+            }
         };
         let done_cb: TcpDoneCallback = Box::new(move |_, now, sim| {
             done(now, sim);
@@ -180,13 +189,9 @@ impl RingTransport for DctcpRingTransport {
                 let route = world.net.route_ecmp_path(src, dst, flow_id);
                 DctcpConn::new(flow_id, src, dst, route, chunk_bytes, self.cfg.clone())
             }
-            CcRoutingMode::PerPacket => DctcpConn::new_dynamic(
-                flow_id,
-                src,
-                dst,
-                chunk_bytes,
-                self.cfg.clone(),
-            ),
+            CcRoutingMode::PerPacket => {
+                DctcpConn::new_dynamic(flow_id, src, dst, chunk_bytes, self.cfg.clone())
+            }
         };
         let done_cb: DctcpDoneCallback = Box::new(move |_, now, sim| {
             done(now, sim);
@@ -202,6 +207,23 @@ fn compute_duration_ns_from_ms(ms: f64) -> u64 {
         return 0;
     }
     (ms * 1_000_000.0).round() as u64
+}
+
+fn default_tcp_cfg() -> TcpConfig {
+    // Keep RTOs reasonably small to avoid huge FCT inflation after drops, but
+    // avoid sub-ms floors that can trigger spurious timeouts due to ACK/data
+    // sharing on host egress queues.
+    //
+    // Also use a large initial ssthresh so bulk transfers can stay in slow-start
+    // long enough to reach line-rate on high-BW, low-RTT topologies (e.g., 100Gbps
+    // with us-scale RTTs). The smaller default (1000*MSS) can underutilize links
+    // for large collectives.
+    let mut cfg = TcpConfig::default();
+    cfg.init_rto = SimTime::from_millis(1);
+    cfg.min_rto = SimTime::from_millis(1);
+    cfg.max_rto = SimTime::from_millis(200);
+    cfg.init_ssthresh_bytes = (cfg.mss as u64).saturating_mul(1_000_000);
+    cfg
 }
 
 fn percentile_ns(values: &[u64], p: f64) -> Option<u64> {
@@ -304,22 +326,28 @@ impl htsim_rs::sim::Event for StartWorkloadStep {
             .expect("world must be NetWorld");
 
         let (step, hosts, protocol, routing, next_flow_id, gpu_map, tcp_cfg, dctcp_cfg) = {
-            let mut st = state.lock().expect("workload state lock");
+            let st = state.lock().expect("workload state lock");
             if idx >= st.steps.len() {
                 return;
             }
             let step = st.steps[idx].clone();
-            let hosts = step
-                .hosts
-                .clone()
-                .unwrap_or_else(|| st.hosts_all.clone());
+            let hosts = step.hosts.clone().unwrap_or_else(|| st.hosts_all.clone());
             let protocol = step.protocol.unwrap_or(st.protocol);
             let routing = st.routing;
             let next_flow_id = st.next_flow_id;
             let gpu_map = st.gpu_map.clone();
             let tcp_cfg = st.tcp_cfg.clone();
             let dctcp_cfg = st.dctcp_cfg.clone();
-            (step, hosts, protocol, routing, next_flow_id, gpu_map, tcp_cfg, dctcp_cfg)
+            (
+                step,
+                hosts,
+                protocol,
+                routing,
+                next_flow_id,
+                gpu_map,
+                tcp_cfg,
+                dctcp_cfg,
+            )
         };
 
         let duration_ns = Self::compute_duration_ns(&step);
@@ -549,9 +577,8 @@ impl htsim_rs::sim::Event for StartRankStep {
                                 .collect::<Vec<_>>();
                             let ranks = host_nodes.len();
                             let total_steps = ranks.saturating_sub(1) * 2;
-                            let flow_span = (ranks as u64)
-                                .saturating_mul(total_steps as u64)
-                                .max(1);
+                            let flow_span =
+                                (ranks as u64).saturating_mul(total_steps as u64).max(1);
                             let start_flow_id = st.next_flow_id;
                             st.next_flow_id = st.next_flow_id.saturating_add(flow_span);
                             start_cfg = Some((
@@ -699,16 +726,7 @@ impl htsim_rs::sim::Event for StartRankStep {
                         return;
                     }
                     start_p2p_flow(
-                        sim,
-                        w,
-                        protocol,
-                        routing,
-                        &tcp_cfg,
-                        &dctcp_cfg,
-                        flow_id,
-                        src,
-                        dst,
-                        bytes,
+                        sim, w, protocol, routing, &tcp_cfg, &dctcp_cfg, flow_id, src, dst, bytes,
                         done_cb,
                     );
                 }
@@ -768,7 +786,14 @@ fn build_topology(world: &mut NetWorld, topo: &TopologySpec) -> Vec<NodeId> {
     }
 }
 
-fn resolve_hosts(hosts: &[HostSpec], topo_hosts: &[NodeId]) -> (Vec<usize>, HashMap<usize, NodeId>, HashMap<usize, Option<String>>) {
+fn resolve_hosts(
+    hosts: &[HostSpec],
+    topo_hosts: &[NodeId],
+) -> (
+    Vec<usize>,
+    HashMap<usize, NodeId>,
+    HashMap<usize, Option<String>>,
+) {
     let mut host_ids = Vec::new();
     let mut host_map = HashMap::new();
     let mut gpu_map = HashMap::new();
@@ -822,16 +847,27 @@ fn main() {
     let topo_hosts = build_topology(&mut world, &workload.topology);
     let (host_ids, host_map, gpu_map) = resolve_hosts(&workload.hosts, &topo_hosts);
 
-    let queue_bytes = if let Some(bytes) = args.queue_bytes {
+    let switch_queue_bytes = if let Some(bytes) = args.queue_bytes {
         Some(bytes)
     } else if let Some(pkts) = args.queue_pkts {
         Some(pkts.saturating_mul(DEFAULT_PKT_BYTES))
     } else {
         None
     };
-    if let Some(bytes) = queue_bytes {
-        world.net.set_all_link_queue_capacity_bytes(bytes);
+    if let Some(bytes) = switch_queue_bytes {
+        world.net.set_switch_egress_queue_capacity_bytes(bytes);
     }
+
+    let host_queue_bytes = if let Some(bytes) = args.host_queue_bytes {
+        bytes
+    } else if let Some(pkts) = args.host_queue_pkts {
+        pkts.saturating_mul(DEFAULT_PKT_BYTES)
+    } else {
+        DEFAULT_HOST_EGRESS_QUEUE_BYTES
+    };
+    world
+        .net
+        .set_host_egress_queue_capacity_bytes(host_queue_bytes);
 
     let defaults = workload.defaults.clone().unwrap_or(WorkloadDefaults {
         protocol: Some(TransportProtocol::Tcp),
@@ -873,7 +909,7 @@ fn main() {
             protocol,
             routing,
             next_flow_id: 1,
-            tcp_cfg: TcpConfig::default(),
+            tcp_cfg: default_tcp_cfg(),
             dctcp_cfg: DctcpConfig::default(),
             pending_collectives: HashMap::new(),
             pending_sendrecv: HashMap::new(),
@@ -898,7 +934,7 @@ fn main() {
             protocol,
             routing,
             next_flow_id: 1,
-            tcp_cfg: TcpConfig::default(),
+            tcp_cfg: default_tcp_cfg(),
             dctcp_cfg: DctcpConfig::default(),
             allreduce_handles: Arc::clone(&allreduce_handles),
         }));
