@@ -526,7 +526,8 @@ const hookTpCommFactor = ref("2");
 const hookStatus = ref("请选择模型与 GPU。");
 const hookRequestSummary = ref("");
 const hookResponseSummary = ref("");
-const hookApi = computed(() => {
+const hookProxyApi = "/api-workload/workload";
+const hookDirectApi = computed(() => {
     if (typeof window === "undefined") return "http://127.0.0.1:3100/api/workload";
     const host = window.location.hostname || "127.0.0.1";
     return `http://${host}:3100/api/workload`;
@@ -682,6 +683,7 @@ const predictorOptions = Array.from(
 ).sort();
 
 const predictionGpu = ref("NVIDIA_A100-PCIE-40GB");
+const predictionGpuResolved = computed(() => predictionGpu.value || gpuModel.value.trim());
 const predictionPredictor = ref(
     predictorOptions.includes("neusight") ? "neusight" : predictorOptions[0] || ""
 );
@@ -713,7 +715,7 @@ const hostCount = computed(() => String(hostCountValue.value));
 
 const filteredPredictions = computed(() => {
     const model = modelName.value.trim();
-    const gpu = predictionGpu.value || gpuModel.value.trim();
+    const gpu = predictionGpuResolved.value;
     const predictor = predictionPredictor.value;
     const mode = predictionMode.value;
     const options = predictionOptions.value;
@@ -747,7 +749,7 @@ const selectedPrediction = computed(() => {
 });
 const canBuildPrediction = computed(() => {
     const model = modelName.value.trim();
-    const gpu = predictionGpu.value || gpuModel.value.trim();
+    const gpu = predictionGpuResolved.value;
     const predictor = predictionPredictor.value;
     const mode = predictionMode.value;
     const seq = Number(predictionSeq.value);
@@ -848,7 +850,7 @@ function pickDefaultPrediction(entries) {
 
 function updatePredictionStatus(entries) {
     const model = modelName.value.trim();
-    const gpu = gpuModel.value.trim();
+    const gpu = predictionGpuResolved.value;
     if (!model || !gpu) {
         predictionStatus.value = "请选择模型与 GPU。";
         return;
@@ -2027,18 +2029,39 @@ async function buildFromHook() {
     hookResponseSummary.value = "";
     hookStatus.value = "测量中，请稍候...";
     try {
-        const resp = await fetch(hookApi.value, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
+        const postJson = async (url) => {
+            const resp = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            let data = null;
+            try {
+                data = await resp.json();
+            } catch (parseErr) {
+                data = null;
+            }
+            return { resp, data };
+        };
+        let endpoint = hookProxyApi;
+        let resp = null;
+        let data = null;
+        try {
+            ({ resp, data } = await postJson(endpoint));
+            if ([404, 502, 503].includes(resp.status)) {
+                throw new Error(`hook proxy unavailable (status ${resp.status})`);
+            }
+        } catch (proxyErr) {
+            endpoint = hookDirectApi.value;
+            ({ resp, data } = await postJson(endpoint));
+        }
         let data = null;
         try {
             data = await resp.json();
         } catch (parseErr) {
             data = null;
         }
-        const responseParts = [`status=${resp.status}`, `ok=${Boolean(data?.ok)}`];
+        const responseParts = [`status=${resp.status}`, `ok=${Boolean(data?.ok)}`, `endpoint=${endpoint}`];
         if (Number.isFinite(data?.elapsed_ms)) responseParts.push(`elapsed_ms=${data.elapsed_ms}`);
         if (data?.path) responseParts.push(`path=${data.path}`);
         if (data?.error) responseParts.push(`error=${data.error}`);
@@ -2063,7 +2086,7 @@ async function buildFromPrediction() {
         return;
     }
     const model = modelName.value.trim();
-    const gpu = gpuModel.value.trim();
+    const gpu = predictionGpuResolved.value;
     const predictor = predictionPredictor.value;
     const mode = predictionMode.value;
     const seq = parseNumber(predictionSeq.value, NaN);
