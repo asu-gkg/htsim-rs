@@ -346,11 +346,12 @@
                             <select v-model="step.kind">
                                 <option value="compute">compute</option>
                                 <option value="collective">collective</option>
+                                <option value="collective_wait">collective_wait</option>
                                 <option value="sendrecv">sendrecv</option>
                             </select>
                             <input v-model="step.compute_ms" type="text" :disabled="step.kind !== 'compute'" />
-                            <input v-model="step.comm_bytes" type="text" :disabled="step.kind === 'compute'" />
-                            <input v-model="step.comm_id" type="text" :disabled="step.kind === 'compute'" />
+                            <input v-model="step.comm_bytes" type="text" :disabled="step.kind === 'compute' || step.kind === 'collective_wait'" />
+                            <input v-model="step.comm_id" type="text" :disabled="step.kind === 'compute' || step.kind === 'collective_wait'" />
                             <input v-model="step.op" type="text" :disabled="step.kind !== 'collective'" />
                             <input
                                 v-model="step.hosts"
@@ -1105,21 +1106,66 @@ function splitLayers(rows, modelName, numLayers) {
 }
 
 function commBytesFromOps(ops, bytesPerElement) {
-    let total = 0;
-    if (!Array.isArray(ops)) return total;
+    const stats = commStatsFromOps(ops, bytesPerElement);
+    return stats.total_bytes;
+}
+
+function normalizeCommOpName(raw) {
+    const name = String(raw || "").toUpperCase();
+    if (name === "ALLREDUCE") return "allreduce";
+    if (name === "ALLREDUCE_ASYNC") return "allreduce_async";
+    if (name === "ALLGATHER" || name === "ALLGATHER_DP_EP") return "allgather";
+    if (name === "REDUCESCATTER" || name === "REDUCESCATTER_DP_EP") return "reducescatter";
+    if (name === "ALLTOALL" || name === "ALLTOALL_EP") return "alltoall";
+    if (name === "SENDRECV") return "sendrecv";
+    return name.toLowerCase();
+}
+
+function mergeCommByOp(into, from) {
+    if (!from) return;
+    for (const [op, bytes] of Object.entries(from)) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        into[op] = (into[op] || 0) + value;
+    }
+}
+
+function pickPrimaryOp(byOp) {
+    if (!byOp) return "";
+    let best = "";
+    let bestBytes = 0;
+    for (const [op, bytes] of Object.entries(byOp)) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (value > bestBytes) {
+            best = op;
+            bestBytes = value;
+        }
+    }
+    return best;
+}
+
+function commStatsFromOps(ops, bytesPerElement) {
+    const by_op = {};
+    let total_bytes = 0;
+    if (!Array.isArray(ops)) return { total_bytes, by_op };
     for (const op of ops) {
         if (!Array.isArray(op) || op.length < 2) continue;
-        const name = op[0];
+        const rawName = String(op[0] || "");
+        const name = rawName.toUpperCase();
         if (!COMM_OPS.has(name)) continue;
         const args = op[1];
         if (Array.isArray(args) && args.length) {
             const size = Number(args[0]);
             if (Number.isFinite(size) && size > 0) {
-                total += Math.trunc(size) * bytesPerElement;
+                const bytes = Math.trunc(size) * bytesPerElement;
+                total_bytes += bytes;
+                const norm = normalizeCommOpName(name);
+                by_op[norm] = (by_op[norm] || 0) + bytes;
             }
         }
     }
-    return total;
+    return { total_bytes, by_op };
 }
 
 function inferCommGroup(row) {
@@ -1129,7 +1175,10 @@ function inferCommGroup(row) {
     if (name.endsWith("_grad") && opname === "allreduce") return "dp";
     if (
         name.includes("tensor_model_parallel") ||
-        name.includes("reduce_from_tensor_model_parallel_region")
+        name.includes("reduce_from_tensor_model_parallel_region") ||
+        name.includes("gather_from_tensor_model_parallel_region") ||
+        name.includes("reduce_scatter_to_tensor_model_parallel_region") ||
+        name.includes("scatter_to_tensor_model_parallel_region")
     ) {
         return "tp";
     }
@@ -1143,9 +1192,16 @@ function collectLayerStats(rows, bytesPerElement) {
     let tpBwBytes = 0;
     let dpBwBytes = 0;
     let ppBytes = 0;
+    const tpFwByOp = {};
+    const tpBwByOp = {};
+    const dpBwByOp = {};
+    const unknownFwByOp = {};
+    const unknownBwByOp = {};
     for (const row of rows) {
-        const fwComm = commBytesFromOps(row.FwOps, bytesPerElement);
-        const bwComm = commBytesFromOps(row.BwOps, bytesPerElement);
+        const fwCommStats = commStatsFromOps(row.FwOps, bytesPerElement);
+        const bwCommStats = commStatsFromOps(row.BwOps, bytesPerElement);
+        const fwComm = fwCommStats.total_bytes;
+        const bwComm = bwCommStats.total_bytes;
         const commGroupRaw = row.CommGroup ? String(row.CommGroup).toLowerCase() : "";
         const commGroup = commGroupRaw || inferCommGroup(row);
 
@@ -1153,8 +1209,12 @@ function collectLayerStats(rows, bytesPerElement) {
             if (commGroup === "tp") {
                 tpFwBytes += fwComm;
                 tpBwBytes += bwComm;
+                mergeCommByOp(tpFwByOp, fwCommStats.by_op);
+                mergeCommByOp(tpBwByOp, bwCommStats.by_op);
             } else if (commGroup === "dp") {
                 dpBwBytes += fwComm + bwComm;
+                mergeCommByOp(dpBwByOp, fwCommStats.by_op);
+                mergeCommByOp(dpBwByOp, bwCommStats.by_op);
             } else if (commGroup === "pp") {
                 ppBytes = Math.max(ppBytes, fwComm, bwComm);
             }
@@ -1169,8 +1229,17 @@ function collectLayerStats(rows, bytesPerElement) {
             if (inferred === "tp") {
                 tpFwBytes += fwComm;
                 tpBwBytes += bwComm;
+                mergeCommByOp(tpFwByOp, fwCommStats.by_op);
+                mergeCommByOp(tpBwByOp, bwCommStats.by_op);
             } else if (inferred === "dp") {
                 dpBwBytes += fwComm + bwComm;
+                mergeCommByOp(dpBwByOp, fwCommStats.by_op);
+                mergeCommByOp(dpBwByOp, bwCommStats.by_op);
+            } else if (inferred === "pp") {
+                ppBytes = Math.max(ppBytes, fwComm, bwComm);
+            } else {
+                mergeCommByOp(unknownFwByOp, fwCommStats.by_op);
+                mergeCommByOp(unknownBwByOp, bwCommStats.by_op);
             }
         }
     }
@@ -1200,6 +1269,11 @@ function collectLayerStats(rows, bytesPerElement) {
         tp_bw_bytes: tpBwBytes,
         dp_bw_bytes: dpBwBytes,
         pp_bytes: ppBytes,
+        tp_fw_by_op: tpFwByOp,
+        tp_bw_by_op: tpBwByOp,
+        dp_bw_by_op: dpBwByOp,
+        unknown_fw_by_op: unknownFwByOp,
+        unknown_bw_by_op: unknownBwByOp,
     };
 }
 
@@ -1287,6 +1361,29 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
             comm_id: commId,
         });
     };
+    const addCollectivesByOp = (label, byOp, totalBytes, hosts, commId) => {
+        const items = [];
+        if (byOp && typeof byOp === "object") {
+            for (const [op, bytes] of Object.entries(byOp)) {
+                const value = Math.trunc(Number(bytes));
+                if (!Number.isFinite(value) || value <= 0) continue;
+                items.push([String(op), value]);
+            }
+        }
+        if (!items.length) {
+            addCollective(label, "allreduce", totalBytes, hosts, commId);
+            return;
+        }
+        if (items.length === 1) {
+            const [op, bytes] = items[0];
+            addCollective(label, op, bytes, hosts, commId);
+            return;
+        }
+        items.sort((a, b) => a[0].localeCompare(b[0]));
+        for (const [op, bytes] of items) {
+            addCollective(`${label}_${op}`, op, bytes, hosts, `${commId}-${op}`);
+        }
+    };
     const addSendrecv = (label, commBytes, peer, direction, commId) => {
         if (commBytes <= 0 || peer == null) return;
         steps.push({
@@ -1300,6 +1397,14 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
     };
 
     const forwardStep = (microbatch) => {
+        const tpFwByOp = { ...(stats.tp_fw_by_op || {}) };
+        const dpFwByOp = {};
+        if (tpDegree > 1) {
+            mergeCommByOp(tpFwByOp, stats.unknown_fw_by_op);
+        } else {
+            mergeCommByOp(dpFwByOp, stats.unknown_fw_by_op);
+        }
+
         if (prevRank != null) {
             addSendrecv(
                 `fwd_recv_mb${microbatch}`,
@@ -1310,13 +1415,22 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
             );
         }
         addCompute(`fwd_mb${microbatch}`, stats.fw_compute_ms);
-        addCollective(
+        addCollectivesByOp(
             `tp_fwd_mb${microbatch}`,
-            "allreduce",
+            tpFwByOp,
             stats.tp_fw_bytes,
             tpGroup,
             tpCommId("fwd", microbatch)
         );
+        if (tpDegree <= 1) {
+            addCollectivesByOp(
+                `dp_fwd_mb${microbatch}`,
+                dpFwByOp,
+                0,
+                dpGroup,
+                dpCommId("fwd", microbatch)
+            );
+        }
         if (nextRank != null) {
             addSendrecv(
                 `fwd_send_mb${microbatch}`,
@@ -1329,6 +1443,14 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
     };
 
     const backwardStep = (microbatch) => {
+        const tpBwByOp = { ...(stats.tp_bw_by_op || {}) };
+        const dpBwByOp = { ...(stats.dp_bw_by_op || {}) };
+        if (tpDegree > 1) {
+            mergeCommByOp(tpBwByOp, stats.unknown_bw_by_op);
+        } else {
+            mergeCommByOp(dpBwByOp, stats.unknown_bw_by_op);
+        }
+
         if (nextRank != null) {
             addSendrecv(
                 `bwd_recv_mb${microbatch}`,
@@ -1339,16 +1461,16 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
             );
         }
         addCompute(`bwd_mb${microbatch}`, stats.bw_compute_ms);
-        addCollective(
+        addCollectivesByOp(
             `tp_bwd_mb${microbatch}`,
-            "allreduce",
+            tpBwByOp,
             stats.tp_bw_bytes,
             tpGroup,
             tpCommId("bwd", microbatch)
         );
-        addCollective(
+        addCollectivesByOp(
             `dp_bwd_mb${microbatch}`,
-            "allreduce",
+            dpBwByOp,
             stats.dp_bw_bytes,
             dpGroup,
             dpCommId("bwd", microbatch)
@@ -1392,6 +1514,15 @@ function buildRankSteps(rankInfo, stageStats, dpDegree, ppDegree, tpDegree, micr
         }
     }
 
+    const isAsyncCollective = (step) => {
+        if (!step || step.kind !== "collective") return false;
+        const op = String(step.op || "").trim().toLowerCase();
+        return op.replace(/[_-]/g, "").endsWith("async");
+    };
+    if (steps.some(isAsyncCollective)) {
+        steps.push({ kind: "collective_wait", label: "collective_wait" });
+    }
+
     return steps.map((step, index) => ({ ...step, id: index }));
 }
 
@@ -1419,6 +1550,18 @@ function buildRanksFromRows(rows) {
         const start = stage * perStage;
         const end = start + perStage;
         const chunk = layerStats.slice(start, end);
+        const tpFwByOp = {};
+        const tpBwByOp = {};
+        const dpBwByOp = {};
+        const unknownFwByOp = {};
+        const unknownBwByOp = {};
+        for (const item of chunk) {
+            mergeCommByOp(tpFwByOp, item.tp_fw_by_op);
+            mergeCommByOp(tpBwByOp, item.tp_bw_by_op);
+            mergeCommByOp(dpBwByOp, item.dp_bw_by_op);
+            mergeCommByOp(unknownFwByOp, item.unknown_fw_by_op);
+            mergeCommByOp(unknownBwByOp, item.unknown_bw_by_op);
+        }
         const stageStat = {
             fw_compute_ms: chunk.reduce((sum, item) => sum + item.fw_compute_ms, 0),
             bw_compute_ms: chunk.reduce((sum, item) => sum + item.bw_compute_ms, 0),
@@ -1426,6 +1569,11 @@ function buildRanksFromRows(rows) {
             tp_bw_bytes: chunk.reduce((sum, item) => sum + item.tp_bw_bytes, 0),
             dp_bw_bytes: chunk.reduce((sum, item) => sum + item.dp_bw_bytes, 0),
             pp_bytes: chunk.length ? chunk[chunk.length - 1].pp_bytes : 0,
+            tp_fw_by_op: tpFwByOp,
+            tp_bw_by_op: tpBwByOp,
+            dp_bw_by_op: dpBwByOp,
+            unknown_fw_by_op: unknownFwByOp,
+            unknown_bw_by_op: unknownBwByOp,
         };
         if (stage === 0 && prologueStats) {
             stageStat.fw_compute_ms += prologueStats.fw_compute_ms;
@@ -1433,6 +1581,11 @@ function buildRanksFromRows(rows) {
             stageStat.tp_fw_bytes += prologueStats.tp_fw_bytes;
             stageStat.tp_bw_bytes += prologueStats.tp_bw_bytes;
             stageStat.dp_bw_bytes += prologueStats.dp_bw_bytes;
+            mergeCommByOp(stageStat.tp_fw_by_op, prologueStats.tp_fw_by_op);
+            mergeCommByOp(stageStat.tp_bw_by_op, prologueStats.tp_bw_by_op);
+            mergeCommByOp(stageStat.dp_bw_by_op, prologueStats.dp_bw_by_op);
+            mergeCommByOp(stageStat.unknown_fw_by_op, prologueStats.unknown_fw_by_op);
+            mergeCommByOp(stageStat.unknown_bw_by_op, prologueStats.unknown_bw_by_op);
         }
         if (stage === pp - 1 && epilogueStats) {
             stageStat.fw_compute_ms += epilogueStats.fw_compute_ms;
@@ -1440,6 +1593,11 @@ function buildRanksFromRows(rows) {
             stageStat.tp_fw_bytes += epilogueStats.tp_fw_bytes;
             stageStat.tp_bw_bytes += epilogueStats.tp_bw_bytes;
             stageStat.dp_bw_bytes += epilogueStats.dp_bw_bytes;
+            mergeCommByOp(stageStat.tp_fw_by_op, epilogueStats.tp_fw_by_op);
+            mergeCommByOp(stageStat.tp_bw_by_op, epilogueStats.tp_bw_by_op);
+            mergeCommByOp(stageStat.dp_bw_by_op, epilogueStats.dp_bw_by_op);
+            mergeCommByOp(stageStat.unknown_fw_by_op, epilogueStats.unknown_fw_by_op);
+            mergeCommByOp(stageStat.unknown_bw_by_op, epilogueStats.unknown_bw_by_op);
         }
         stageStats.push(stageStat);
     }

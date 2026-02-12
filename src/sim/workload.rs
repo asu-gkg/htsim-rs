@@ -115,6 +115,12 @@ pub struct RankSpec {
 pub enum RankStepKind {
     Compute,
     Collective,
+    /// Wait for completion of previously launched async collective(s).
+    ///
+    /// This is useful when modeling `*_async` collectives that overlap with
+    /// compute: ranks can proceed after launching the collective, and only
+    /// block when they reach an explicit wait.
+    CollectiveWait,
     Sendrecv,
 }
 
@@ -141,6 +147,12 @@ pub struct RankStepSpec {
     pub comm_bytes: Option<u64>,
     #[serde(default)]
     pub comm_id: Option<String>,
+    /// Optional per-rank communication stream identifier.
+    ///
+    /// When present, async collectives on the same stream are ordered: a later
+    /// comm step on that stream will wait for prior async comm to complete.
+    #[serde(default)]
+    pub comm_stream: Option<u32>,
     #[serde(default)]
     pub hosts: Option<Vec<usize>>,
     #[serde(default)]

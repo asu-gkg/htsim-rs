@@ -15,7 +15,7 @@ pub enum RoutingMode {
 
 /// Callback invoked when a flow finishes.
 pub type RingDoneCallback = Box<dyn Fn(SimTime, &mut Simulator) + Send>;
-/// Callback invoked when a ring allreduce finishes.
+/// Callback invoked when a ring collective finishes.
 pub type RingAllreduceDoneCallback = Box<dyn Fn(SimTime, &mut Simulator) + Send>;
 
 /// Transport adapter used by ring collectives.
@@ -33,14 +33,25 @@ pub trait RingTransport: Send + 'static {
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DstMode {
+    /// Each rank sends to its immediate successor (rank+1).
+    Neighbor,
+    /// Step s sends to (rank+s+1); used to cover all peers in all-to-all.
+    ShiftByStep,
+}
+
 struct State {
     ranks: usize,
     hosts: Vec<NodeId>,
     chunk_bytes: u64,
     routing: RoutingMode,
+    dst_mode: DstMode,
     step: usize,
     inflight: usize,
     next_flow_id: u64,
+    total_steps: usize,
+    reduce_steps: usize,
     start_at: Option<SimTime>,
     reduce_done_at: Option<SimTime>,
     done_at: Option<SimTime>,
@@ -51,7 +62,7 @@ struct State {
 
 impl State {
     fn total_steps(&self) -> usize {
-        self.ranks.saturating_sub(1) * 2
+        self.total_steps
     }
 }
 
@@ -60,6 +71,8 @@ struct StepContext {
     hosts: Vec<NodeId>,
     chunk_bytes: u64,
     routing: RoutingMode,
+    step: usize,
+    dst_mode: DstMode,
     start_flow_id: u64,
 }
 
@@ -123,6 +136,8 @@ impl Event for StartStep {
                 hosts: st.hosts.clone(),
                 chunk_bytes: st.chunk_bytes,
                 routing: st.routing,
+                step: st.step,
+                dst_mode: st.dst_mode,
                 start_flow_id,
             }
         };
@@ -133,7 +148,11 @@ impl Event for StartStep {
         for rank in 0..ctx.ranks {
             let flow_id = ctx.start_flow_id.saturating_add(rank as u64);
             let src = ctx.hosts[rank];
-            let dst = ctx.hosts[(rank + 1) % ctx.ranks];
+            let dst_idx = match ctx.dst_mode {
+                DstMode::Neighbor => (rank + 1) % ctx.ranks,
+                DstMode::ShiftByStep => (rank + ctx.step + 1) % ctx.ranks,
+            };
+            let dst = ctx.hosts[dst_idx];
             let done_state = Arc::clone(&state);
             let done_transport = Arc::clone(&transport_arc);
             let done_cb: RingDoneCallback = Box::new(move |now, sim| {
@@ -182,7 +201,7 @@ impl Event for FlowDone {
             }
             st.inflight = st.inflight.saturating_sub(1);
             if st.inflight == 0 {
-                if st.step + 1 == st.ranks.saturating_sub(1) {
+                if st.reduce_steps > 0 && st.step + 1 == st.reduce_steps {
                     st.reduce_done_at = Some(sim.now());
                 }
                 st.step = st.step.saturating_add(1);
@@ -205,7 +224,7 @@ impl Event for FlowDone {
     }
 }
 
-/// Configuration for a ring allreduce.
+/// Configuration for ring collectives.
 pub struct RingAllreduceConfig {
     pub ranks: usize,
     pub hosts: Vec<NodeId>,
@@ -216,7 +235,7 @@ pub struct RingAllreduceConfig {
     pub done_cb: Option<RingAllreduceDoneCallback>,
 }
 
-/// Runtime stats collected by a ring allreduce.
+/// Runtime stats collected by a ring collective.
 #[derive(Debug, Clone)]
 pub struct RingAllreduceStats {
     pub start_at: Option<SimTime>,
@@ -226,7 +245,7 @@ pub struct RingAllreduceStats {
     pub flow_fct_ns: Vec<u64>,
 }
 
-/// Handle for inspecting ring allreduce progress/results.
+/// Handle for inspecting ring collective progress/results.
 pub struct RingAllreduceHandle {
     state: Arc<Mutex<State>>,
 }
@@ -254,14 +273,90 @@ pub fn start_ring_allreduce_at(
     cfg: RingAllreduceConfig,
     start_at: SimTime,
 ) -> RingAllreduceHandle {
+    let reduce_steps = cfg.ranks.saturating_sub(1);
+    let total_steps = reduce_steps.saturating_mul(2);
+    start_ring_at_internal(
+        sim,
+        cfg,
+        start_at,
+        total_steps,
+        reduce_steps,
+        DstMode::Neighbor,
+    )
+}
+
+/// Schedule a ring allgather at SimTime::ZERO and return a handle for stats.
+pub fn start_ring_allgather(sim: &mut Simulator, cfg: RingAllreduceConfig) -> RingAllreduceHandle {
+    start_ring_allgather_at(sim, cfg, SimTime::ZERO)
+}
+
+pub fn start_ring_allgather_at(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+    start_at: SimTime,
+) -> RingAllreduceHandle {
+    let total_steps = cfg.ranks.saturating_sub(1);
+    start_ring_at_internal(sim, cfg, start_at, total_steps, 0, DstMode::Neighbor)
+}
+
+/// Schedule a ring reduce-scatter at SimTime::ZERO and return a handle for stats.
+pub fn start_ring_reducescatter(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+) -> RingAllreduceHandle {
+    start_ring_reducescatter_at(sim, cfg, SimTime::ZERO)
+}
+
+pub fn start_ring_reducescatter_at(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+    start_at: SimTime,
+) -> RingAllreduceHandle {
+    let total_steps = cfg.ranks.saturating_sub(1);
+    // The reduce-scatter phase completes at the end of the algorithm.
+    start_ring_at_internal(
+        sim,
+        cfg,
+        start_at,
+        total_steps,
+        total_steps,
+        DstMode::Neighbor,
+    )
+}
+
+/// Schedule a ring all-to-all at SimTime::ZERO and return a handle for stats.
+pub fn start_ring_alltoall(sim: &mut Simulator, cfg: RingAllreduceConfig) -> RingAllreduceHandle {
+    start_ring_alltoall_at(sim, cfg, SimTime::ZERO)
+}
+
+pub fn start_ring_alltoall_at(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+    start_at: SimTime,
+) -> RingAllreduceHandle {
+    let total_steps = cfg.ranks.saturating_sub(1);
+    start_ring_at_internal(sim, cfg, start_at, total_steps, 0, DstMode::ShiftByStep)
+}
+
+fn start_ring_at_internal(
+    sim: &mut Simulator,
+    cfg: RingAllreduceConfig,
+    start_at: SimTime,
+    total_steps: usize,
+    reduce_steps: usize,
+    dst_mode: DstMode,
+) -> RingAllreduceHandle {
     let state = Arc::new(Mutex::new(State {
         ranks: cfg.ranks,
         hosts: cfg.hosts,
         chunk_bytes: cfg.chunk_bytes,
         routing: cfg.routing,
+        dst_mode,
         step: 0,
         inflight: 0,
         next_flow_id: cfg.start_flow_id,
+        total_steps,
+        reduce_steps: reduce_steps.min(total_steps),
         start_at: None,
         reduce_done_at: None,
         done_at: None,

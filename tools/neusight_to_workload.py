@@ -178,7 +178,60 @@ def split_layers(rows, model_name, num_layers):
 
 
 def comm_bytes_from_ops(ops, bytes_per_element):
-    total = 0
+    return comm_stats_from_ops(ops, bytes_per_element)[0]
+
+
+def normalize_comm_op_name(raw):
+    name = str(raw or "").upper()
+    if name == "ALLREDUCE":
+        return "allreduce"
+    if name == "ALLREDUCE_ASYNC":
+        return "allreduce_async"
+    if name in ("ALLGATHER", "ALLGATHER_DP_EP"):
+        return "allgather"
+    if name in ("REDUCESCATTER", "REDUCESCATTER_DP_EP"):
+        return "reducescatter"
+    if name in ("ALLTOALL", "ALLTOALL_EP"):
+        return "alltoall"
+    if name == "SENDRECV":
+        return "sendrecv"
+    return name.lower()
+
+
+def merge_comm_by_op(into, from_map):
+    if not from_map:
+        return
+    for op, bytes_val in from_map.items():
+        try:
+            value = int(bytes_val)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        into[op] = into.get(op, 0) + value
+
+
+def pick_primary_op(by_op):
+    if not by_op:
+        return ""
+    best = ""
+    best_bytes = 0
+    for op, bytes_val in by_op.items():
+        try:
+            value = int(bytes_val)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        if value > best_bytes:
+            best = op
+            best_bytes = value
+    return best
+
+
+def comm_stats_from_ops(ops, bytes_per_element):
+    by_op = {}
+    total_bytes = 0
     for op in ops or []:
         if not op or len(op) < 2:
             continue
@@ -189,8 +242,11 @@ def comm_bytes_from_ops(ops, bytes_per_element):
         if isinstance(args, (list, tuple)) and args:
             size = args[0]
             if isinstance(size, (int, float)) and size > 0:
-                total += int(size) * bytes_per_element
-    return total
+                bytes_val = int(size) * bytes_per_element
+                total_bytes += bytes_val
+                norm = normalize_comm_op_name(name)
+                by_op[norm] = by_op.get(norm, 0) + bytes_val
+    return total_bytes, by_op
 
 
 def infer_comm_group(row):
@@ -200,7 +256,13 @@ def infer_comm_group(row):
         return "pp"
     if name.endswith("_grad") and opname == "allreduce":
         return "dp"
-    if "tensor_model_parallel" in name or "reduce_from_tensor_model_parallel_region" in name:
+    if (
+        "tensor_model_parallel" in name
+        or "reduce_from_tensor_model_parallel_region" in name
+        or "gather_from_tensor_model_parallel_region" in name
+        or "reduce_scatter_to_tensor_model_parallel_region" in name
+        or "scatter_to_tensor_model_parallel_region" in name
+    ):
         return "tp"
     return ""
 
@@ -212,19 +274,28 @@ def collect_layer_stats(rows, bytes_per_element):
     tp_bw_bytes = 0
     dp_bw_bytes = 0
     pp_bytes = 0
+    tp_fw_by_op = {}
+    tp_bw_by_op = {}
+    dp_bw_by_op = {}
+    unknown_fw_by_op = {}
+    unknown_bw_by_op = {}
     for row in rows:
         fw_ops = row.get("FwOps", [])
         bw_ops = row.get("BwOps", [])
-        fw_comm = comm_bytes_from_ops(fw_ops, bytes_per_element)
-        bw_comm = comm_bytes_from_ops(bw_ops, bytes_per_element)
+        fw_comm, fw_by_op = comm_stats_from_ops(fw_ops, bytes_per_element)
+        bw_comm, bw_by_op = comm_stats_from_ops(bw_ops, bytes_per_element)
         comm_group = row.get("CommGroup") or infer_comm_group(row)
 
         if comm_group:
             if comm_group == "tp":
                 tp_fw_bytes += fw_comm
                 tp_bw_bytes += bw_comm
+                merge_comm_by_op(tp_fw_by_op, fw_by_op)
+                merge_comm_by_op(tp_bw_by_op, bw_by_op)
             elif comm_group == "dp":
                 dp_bw_bytes += fw_comm + bw_comm
+                merge_comm_by_op(dp_bw_by_op, fw_by_op)
+                merge_comm_by_op(dp_bw_by_op, bw_by_op)
             elif comm_group == "pp":
                 pp_bytes = max(pp_bytes, fw_comm, bw_comm)
             continue
@@ -237,8 +308,17 @@ def collect_layer_stats(rows, bytes_per_element):
             if inferred == "tp":
                 tp_fw_bytes += fw_comm
                 tp_bw_bytes += bw_comm
+                merge_comm_by_op(tp_fw_by_op, fw_by_op)
+                merge_comm_by_op(tp_bw_by_op, bw_by_op)
             elif inferred == "dp":
                 dp_bw_bytes += fw_comm + bw_comm
+                merge_comm_by_op(dp_bw_by_op, fw_by_op)
+                merge_comm_by_op(dp_bw_by_op, bw_by_op)
+            elif inferred == "pp":
+                pp_bytes = max(pp_bytes, fw_comm, bw_comm)
+            else:
+                merge_comm_by_op(unknown_fw_by_op, fw_by_op)
+                merge_comm_by_op(unknown_bw_by_op, bw_by_op)
 
     if pp_bytes <= 0 and rows:
         shape = rows[-1].get("OutputShape")
@@ -257,6 +337,11 @@ def collect_layer_stats(rows, bytes_per_element):
         "tp_bw_bytes": tp_bw_bytes,
         "dp_bw_bytes": dp_bw_bytes,
         "pp_bytes": pp_bytes,
+        "tp_fw_by_op": tp_fw_by_op,
+        "tp_bw_by_op": tp_bw_by_op,
+        "dp_bw_by_op": dp_bw_by_op,
+        "unknown_fw_by_op": unknown_fw_by_op,
+        "unknown_bw_by_op": unknown_bw_by_op,
     }
 
 
@@ -282,6 +367,7 @@ def build_rank_steps(
     tp_degree,
     microbatches,
     pipeline,
+    collective_wait,
 ):
     dp_idx = rank_info["dp"]
     pp_idx = rank_info["pp"]
@@ -329,6 +415,26 @@ def build_rank_steps(
             }
         )
 
+    def add_collectives_by_op(label, by_op, total_bytes, hosts, comm_id):
+        items = []
+        for op, bytes_val in (by_op or {}).items():
+            try:
+                value = int(bytes_val)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            items.append((str(op), value))
+        if not items:
+            add_collective(label, "allreduce", total_bytes, hosts, comm_id)
+            return
+        if len(items) == 1:
+            op, bytes_val = items[0]
+            add_collective(label, op, bytes_val, hosts, comm_id)
+            return
+        for op, bytes_val in sorted(items, key=lambda item: item[0]):
+            add_collective(f"{label}_{op}", op, bytes_val, hosts, f"{comm_id}-{op}")
+
     def add_sendrecv(label, comm_bytes, peer, direction, comm_id):
         if comm_bytes <= 0 or peer is None:
             return
@@ -344,6 +450,13 @@ def build_rank_steps(
         )
 
     def forward_step(microbatch):
+        tp_fw_by_op = dict(stats.get("tp_fw_by_op") or {})
+        dp_fw_by_op = {}
+        if tp_degree > 1:
+            merge_comm_by_op(tp_fw_by_op, stats.get("unknown_fw_by_op"))
+        else:
+            merge_comm_by_op(dp_fw_by_op, stats.get("unknown_fw_by_op"))
+
         if prev_rank is not None:
             add_sendrecv(
                 f"fwd_recv_mb{microbatch}",
@@ -353,13 +466,22 @@ def build_rank_steps(
                 pp_comm_id("fwd", pp_idx - 1, microbatch),
             )
         add_compute(f"fwd_mb{microbatch}", stats["fw_compute_ms"])
-        add_collective(
+        add_collectives_by_op(
             f"tp_fwd_mb{microbatch}",
-            "allreduce",
+            tp_fw_by_op,
             stats["tp_fw_bytes"],
             tp_group,
             tp_comm_id("fwd", microbatch),
         )
+        # If tensor-parallel is disabled, still model forward comm on data-parallel ranks.
+        if tp_degree <= 1:
+            add_collectives_by_op(
+                f"dp_fwd_mb{microbatch}",
+                dp_fw_by_op,
+                0,
+                dp_group,
+                dp_comm_id("fwd", microbatch),
+            )
         if next_rank is not None:
             add_sendrecv(
                 f"fwd_send_mb{microbatch}",
@@ -370,6 +492,13 @@ def build_rank_steps(
             )
 
     def backward_step(microbatch):
+        tp_bw_by_op = dict(stats.get("tp_bw_by_op") or {})
+        dp_bw_by_op = dict(stats.get("dp_bw_by_op") or {})
+        if tp_degree > 1:
+            merge_comm_by_op(tp_bw_by_op, stats.get("unknown_bw_by_op"))
+        else:
+            merge_comm_by_op(dp_bw_by_op, stats.get("unknown_bw_by_op"))
+
         if next_rank is not None:
             add_sendrecv(
                 f"bwd_recv_mb{microbatch}",
@@ -379,16 +508,16 @@ def build_rank_steps(
                 pp_comm_id("bwd", pp_idx + 1, microbatch),
             )
         add_compute(f"bwd_mb{microbatch}", stats["bw_compute_ms"])
-        add_collective(
+        add_collectives_by_op(
             f"tp_bwd_mb{microbatch}",
-            "allreduce",
+            tp_bw_by_op,
             stats["tp_bw_bytes"],
             tp_group,
             tp_comm_id("bwd", microbatch),
         )
-        add_collective(
+        add_collectives_by_op(
             f"dp_bwd_mb{microbatch}",
-            "allreduce",
+            dp_bw_by_op,
             stats["dp_bw_bytes"],
             dp_group,
             dp_comm_id("bwd", microbatch),
@@ -426,6 +555,19 @@ def build_rank_steps(
         while bwd_idx < microbatches:
             backward_step(bwd_idx)
             bwd_idx += 1
+
+    # If any async collective was launched, the simulator needs an explicit wait
+    # step to model the dependency point (e.g., end of iteration).
+    if str(collective_wait or "").lower() == "end":
+        def is_async_collective(step):
+            if step.get("kind") != "collective":
+                return False
+            op = str(step.get("op") or "").strip().lower()
+            compact = "".join(ch for ch in op if ch not in ("_", "-"))
+            return compact.endswith("async")
+
+        if any(is_async_collective(step) for step in steps):
+            steps.append({"kind": "collective_wait", "label": "collective_wait"})
 
     for idx, step in enumerate(steps):
         step["id"] = idx
@@ -502,6 +644,12 @@ def main():
     parser.add_argument("--pp-microbatch", type=int, default=1, help="Pipeline microbatch count")
     parser.add_argument("--layout", default="dp-pp-tp", choices=["dp-pp-tp"], help="Rank layout order")
     parser.add_argument("--pipeline", default="1f1b", choices=["1f1b", "fwd_bwd"], help="Pipeline schedule")
+    parser.add_argument(
+        "--collective-wait",
+        default="end",
+        choices=["none", "end"],
+        help="Insert `collective_wait` for `*_async` collectives (schema_version=2)",
+    )
     parser.add_argument("--gpu", help="GPU model (e.g. NVIDIA H100)")
     parser.add_argument("--protocol", default="tcp", choices=["tcp", "dctcp"], help="Default transport protocol")
     parser.add_argument("--routing", default="per_flow", choices=["per_flow", "per_packet"], help="ECMP routing mode")
@@ -626,6 +774,17 @@ def main():
             start = stage * per_stage_layer
             end = start + per_stage_layer
             chunk = layer_stats[start:end]
+            tp_fw_by_op = {}
+            tp_bw_by_op = {}
+            dp_bw_by_op = {}
+            unknown_fw_by_op = {}
+            unknown_bw_by_op = {}
+            for item in chunk:
+                merge_comm_by_op(tp_fw_by_op, item.get("tp_fw_by_op"))
+                merge_comm_by_op(tp_bw_by_op, item.get("tp_bw_by_op"))
+                merge_comm_by_op(dp_bw_by_op, item.get("dp_bw_by_op"))
+                merge_comm_by_op(unknown_fw_by_op, item.get("unknown_fw_by_op"))
+                merge_comm_by_op(unknown_bw_by_op, item.get("unknown_bw_by_op"))
             stage_stat = {
                 "fw_compute_ms": sum(item["fw_compute_ms"] for item in chunk),
                 "bw_compute_ms": sum(item["bw_compute_ms"] for item in chunk),
@@ -633,6 +792,11 @@ def main():
                 "tp_bw_bytes": sum(item["tp_bw_bytes"] for item in chunk),
                 "dp_bw_bytes": sum(item["dp_bw_bytes"] for item in chunk),
                 "pp_bytes": chunk[-1]["pp_bytes"] if chunk else 0,
+                "tp_fw_by_op": tp_fw_by_op,
+                "tp_bw_by_op": tp_bw_by_op,
+                "dp_bw_by_op": dp_bw_by_op,
+                "unknown_fw_by_op": unknown_fw_by_op,
+                "unknown_bw_by_op": unknown_bw_by_op,
             }
             if stage == 0 and prologue_stats:
                 stage_stat["fw_compute_ms"] += prologue_stats["fw_compute_ms"]
@@ -640,12 +804,34 @@ def main():
                 stage_stat["tp_fw_bytes"] += prologue_stats["tp_fw_bytes"]
                 stage_stat["tp_bw_bytes"] += prologue_stats["tp_bw_bytes"]
                 stage_stat["dp_bw_bytes"] += prologue_stats["dp_bw_bytes"]
+                merge_comm_by_op(stage_stat["tp_fw_by_op"], prologue_stats.get("tp_fw_by_op"))
+                merge_comm_by_op(stage_stat["tp_bw_by_op"], prologue_stats.get("tp_bw_by_op"))
+                merge_comm_by_op(stage_stat["dp_bw_by_op"], prologue_stats.get("dp_bw_by_op"))
+                merge_comm_by_op(
+                    stage_stat["unknown_fw_by_op"],
+                    prologue_stats.get("unknown_fw_by_op"),
+                )
+                merge_comm_by_op(
+                    stage_stat["unknown_bw_by_op"],
+                    prologue_stats.get("unknown_bw_by_op"),
+                )
             if stage == pp_degree - 1 and epilogue_stats:
                 stage_stat["fw_compute_ms"] += epilogue_stats["fw_compute_ms"]
                 stage_stat["bw_compute_ms"] += epilogue_stats["bw_compute_ms"]
                 stage_stat["tp_fw_bytes"] += epilogue_stats["tp_fw_bytes"]
                 stage_stat["tp_bw_bytes"] += epilogue_stats["tp_bw_bytes"]
                 stage_stat["dp_bw_bytes"] += epilogue_stats["dp_bw_bytes"]
+                merge_comm_by_op(stage_stat["tp_fw_by_op"], epilogue_stats.get("tp_fw_by_op"))
+                merge_comm_by_op(stage_stat["tp_bw_by_op"], epilogue_stats.get("tp_bw_by_op"))
+                merge_comm_by_op(stage_stat["dp_bw_by_op"], epilogue_stats.get("dp_bw_by_op"))
+                merge_comm_by_op(
+                    stage_stat["unknown_fw_by_op"],
+                    epilogue_stats.get("unknown_fw_by_op"),
+                )
+                merge_comm_by_op(
+                    stage_stat["unknown_bw_by_op"],
+                    epilogue_stats.get("unknown_bw_by_op"),
+                )
             stage_stats.append(stage_stat)
 
         microbatches = max(1, pp_microbatch)
@@ -659,6 +845,7 @@ def main():
                 tp_degree,
                 microbatches,
                 args.pipeline,
+                args.collective_wait,
             )
             ranks.append({"id": rank_info["id"], "steps": steps})
 

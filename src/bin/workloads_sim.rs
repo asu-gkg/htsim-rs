@@ -1,4 +1,5 @@
 use clap::Parser;
+use htsim_rs::cc::collective::CollectiveOp;
 use htsim_rs::cc::ring::{self, RingAllreduceConfig, RingTransport, RoutingMode as CcRoutingMode};
 use htsim_rs::net::{EcmpHashMode, NetWorld, NodeId};
 use htsim_rs::proto::dctcp::{DctcpConfig, DctcpConn, DctcpDoneCallback};
@@ -44,7 +45,7 @@ struct Args {
     #[arg(long)]
     routing: Option<String>,
 
-    /// Print per-allreduce flow completion time (FCT) stats
+    /// Print per-collective flow completion time (FCT) stats
     #[arg(long)]
     fct_stats: bool,
 
@@ -65,7 +66,7 @@ struct Args {
     host_queue_pkts: Option<u64>,
 }
 
-struct AllreduceRecord {
+struct CollectiveRecord {
     step_id: Option<u64>,
     label: Option<String>,
     comm_id: Option<String>,
@@ -75,15 +76,27 @@ struct AllreduceRecord {
     handle: ring::RingAllreduceHandle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsyncWaitKind {
+    None,
+    All,
+    Stream(u64),
+}
+
 struct RankState {
     steps: Vec<RankStepSpec>,
     idx: usize,
+    pending_async_total: usize,
+    pending_async_by_stream: HashMap<u64, usize>,
+    waiting_for_async: AsyncWaitKind,
 }
 
 struct CollectiveWait {
     hosts: Vec<usize>,
     comm_bytes: u64,
     op: String,
+    is_async: bool,
+    comm_stream: u64,
     arrived: Vec<usize>,
 }
 
@@ -106,7 +119,7 @@ struct RankWorkloadState {
     dctcp_cfg: DctcpConfig,
     pending_collectives: HashMap<String, CollectiveWait>,
     pending_sendrecv: HashMap<String, SendRecvWait>,
-    allreduce_handles: Arc<Mutex<Vec<AllreduceRecord>>>,
+    collective_handles: Arc<Mutex<Vec<CollectiveRecord>>>,
 }
 
 struct StartRankStep {
@@ -284,6 +297,71 @@ fn rank_step_kind(step: &RankStepSpec) -> RankStepKind {
     RankStepKind::Compute
 }
 
+fn collective_is_async(op: &str) -> bool {
+    let normalized = op.trim().to_lowercase();
+    let compact: String = normalized
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .collect();
+    compact.ends_with("async")
+}
+
+fn comm_stream_id(comm_id: &str) -> u64 {
+    // Stable 64-bit FNV-1a hash (do not use `DefaultHasher`, which is randomized).
+    let mut hash: u64 = 14695981039346656037;
+    for b in comm_id.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+fn pending_async_on_stream(rank_state: &RankState, stream: u64) -> usize {
+    rank_state
+        .pending_async_by_stream
+        .get(&stream)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn async_wait_kind_for_step(
+    step: &RankStepSpec,
+    kind: &RankStepKind,
+    rank_state: &RankState,
+) -> AsyncWaitKind {
+    match kind {
+        RankStepKind::Compute => AsyncWaitKind::None,
+        RankStepKind::CollectiveWait => {
+            if let Some(stream) = step.comm_stream {
+                let stream = u64::from(stream);
+                if pending_async_on_stream(rank_state, stream) > 0 {
+                    AsyncWaitKind::Stream(stream)
+                } else {
+                    AsyncWaitKind::None
+                }
+            } else if rank_state.pending_async_total > 0 {
+                AsyncWaitKind::All
+            } else {
+                AsyncWaitKind::None
+            }
+        }
+        RankStepKind::Collective | RankStepKind::Sendrecv => {
+            let Some(comm_id) = step.comm_id.as_deref() else {
+                return AsyncWaitKind::None;
+            };
+            let stream = step
+                .comm_stream
+                .map(u64::from)
+                .unwrap_or_else(|| comm_stream_id(comm_id));
+            if pending_async_on_stream(rank_state, stream) > 0 {
+                AsyncWaitKind::Stream(stream)
+            } else {
+                AsyncWaitKind::None
+            }
+        }
+    }
+}
+
 impl htsim_rs::sim::Event for StartRankStep {
     fn execute(self: Box<Self>, sim: &mut Simulator, world: &mut dyn htsim_rs::sim::World) {
         let StartRankStep { rank_id, state } = *self;
@@ -292,21 +370,27 @@ impl htsim_rs::sim::Event for StartRankStep {
             .downcast_mut::<NetWorld>()
             .expect("world must be NetWorld");
 
-        let (step, host_node, gpu, protocol, routing, tcp_cfg, dctcp_cfg, hosts_all) = {
+        let (step, kind, wait_kind, host_node, gpu, protocol, routing, tcp_cfg, dctcp_cfg, hosts_all) = {
             let mut st = state.lock().expect("rank workload state lock");
             let rank_state = match st.ranks.get_mut(&rank_id) {
                 Some(entry) => entry,
                 None => return,
             };
             if rank_state.idx >= rank_state.steps.len() {
+                if rank_state.pending_async_total > 0 {
+                    rank_state.waiting_for_async = AsyncWaitKind::All;
+                }
                 return;
             }
             let step = rank_state.steps[rank_state.idx].clone();
-            rank_state.idx = rank_state.idx.saturating_add(1);
+            let kind = rank_step_kind(&step);
+            let wait_kind = async_wait_kind_for_step(&step, &kind, rank_state);
             let host_node = *st.host_map.get(&rank_id).expect("unknown host id");
             let gpu = st.gpu_map.get(&rank_id).and_then(|g| g.clone());
             (
                 step,
+                kind,
+                wait_kind,
                 host_node,
                 gpu,
                 st.protocol,
@@ -317,7 +401,26 @@ impl htsim_rs::sim::Event for StartRankStep {
             )
         };
 
-        match rank_step_kind(&step) {
+        if wait_kind != AsyncWaitKind::None {
+            let mut st = state.lock().expect("rank workload state lock");
+            if let Some(rank_state) = st.ranks.get_mut(&rank_id) {
+                rank_state.waiting_for_async = wait_kind;
+            }
+            return;
+        }
+
+        {
+            let mut st = state.lock().expect("rank workload state lock");
+            let Some(rank_state) = st.ranks.get_mut(&rank_id) else {
+                return;
+            };
+            if rank_state.idx >= rank_state.steps.len() {
+                return;
+            }
+            rank_state.idx = rank_state.idx.saturating_add(1);
+        }
+
+        match kind {
             RankStepKind::Compute => {
                 let duration_ns = compute_duration_ns_from_ms(step.compute_ms.unwrap_or(0.0));
                 if duration_ns > 0 {
@@ -347,6 +450,17 @@ impl htsim_rs::sim::Event for StartRankStep {
                     },
                 );
             }
+            RankStepKind::CollectiveWait => {
+                // If there are outstanding async collectives, we would have
+                // returned earlier with `waiting_for_async` set.
+                sim.schedule(
+                    sim.now(),
+                    StartRankStep {
+                        rank_id,
+                        state: Arc::clone(&state),
+                    },
+                );
+            }
             RankStepKind::Collective => {
                 let comm_id = match step.comm_id.clone() {
                     Some(id) => id,
@@ -362,8 +476,47 @@ impl htsim_rs::sim::Event for StartRankStep {
                     }
                 };
                 let comm_bytes = step.comm_bytes.unwrap_or(0);
-                let op = step.op.clone().unwrap_or_else(|| "allreduce".to_string());
+                let op = step
+                    .op
+                    .clone()
+                    .unwrap_or_else(|| "allreduce".to_string())
+                    .trim()
+                    .to_lowercase();
                 let hosts = step.hosts.clone().unwrap_or_else(|| hosts_all.clone());
+                let comm_stream = step
+                    .comm_stream
+                    .map(u64::from)
+                    .unwrap_or_else(|| comm_stream_id(&comm_id));
+                let is_async = collective_is_async(&op);
+
+                if !hosts.contains(&rank_id) {
+                    panic!(
+                        "rank {} not included in collective hosts for comm_id {:?}: hosts={:?}",
+                        rank_id, comm_id, hosts
+                    );
+                }
+
+                // Non-blocking collective launch: allow this rank to continue immediately.
+                if is_async {
+                    if comm_bytes > 0 && hosts.len() > 1 {
+                        let mut st = state.lock().expect("rank workload state lock");
+                        let rank_state = st.ranks.get_mut(&rank_id).expect("missing rank state");
+                        rank_state.pending_async_total =
+                            rank_state.pending_async_total.saturating_add(1);
+                        let counter = rank_state
+                            .pending_async_by_stream
+                            .entry(comm_stream)
+                            .or_insert(0);
+                        *counter = counter.saturating_add(1);
+                    }
+                    sim.schedule(
+                        sim.now(),
+                        StartRankStep {
+                            rank_id,
+                            state: Arc::clone(&state),
+                        },
+                    );
+                }
 
                 let mut start_cfg = None;
                 {
@@ -375,8 +528,34 @@ impl htsim_rs::sim::Event for StartRankStep {
                             hosts: hosts.clone(),
                             comm_bytes,
                             op: op.clone(),
+                            is_async,
+                            comm_stream,
                             arrived: Vec::new(),
                         });
+                    if entry.op != op || entry.is_async != is_async {
+                        panic!(
+                            "comm_id {:?} collective op mismatch: existing op={:?} async={} vs new op={:?} async={}",
+                            comm_id, entry.op, entry.is_async, op, is_async
+                        );
+                    }
+                    if entry.comm_bytes != comm_bytes {
+                        panic!(
+                            "comm_id {:?} collective comm_bytes mismatch: existing bytes={} vs new bytes={}",
+                            comm_id, entry.comm_bytes, comm_bytes
+                        );
+                    }
+                    if entry.hosts != hosts {
+                        panic!(
+                            "comm_id {:?} collective hosts mismatch: existing hosts={:?} vs new hosts={:?}",
+                            comm_id, entry.hosts, hosts
+                        );
+                    }
+                    if entry.comm_stream != comm_stream {
+                        panic!(
+                            "comm_id {:?} collective comm_stream mismatch: existing stream={} vs new stream={}",
+                            comm_id, entry.comm_stream, comm_stream
+                        );
+                    }
                     if !entry.arrived.contains(&rank_id) {
                         entry.arrived.push(rank_id);
                     }
@@ -392,6 +571,8 @@ impl htsim_rs::sim::Event for StartRankStep {
                                 entry.comm_bytes,
                                 Some(comm_id.clone()),
                                 Some(entry.op),
+                                entry.is_async,
+                                entry.comm_stream,
                             ));
                         } else {
                             let host_nodes = entry
@@ -400,66 +581,146 @@ impl htsim_rs::sim::Event for StartRankStep {
                                 .map(|hid| *st.host_map.get(hid).expect("unknown host id"))
                                 .collect::<Vec<_>>();
                             let ranks = host_nodes.len();
-                            let total_steps = ranks.saturating_sub(1) * 2;
+                            let algo = CollectiveOp::parse(&entry.op).unwrap_or_else(|err| {
+                                panic!(
+                                    "invalid collective op {:?} for comm_id {:?}: {err}",
+                                    entry.op, comm_id
+                                )
+                            });
+                            let total_steps = algo.total_steps(ranks);
                             let flow_span =
                                 (ranks as u64).saturating_mul(total_steps as u64).max(1);
                             let start_flow_id = st.next_flow_id;
                             st.next_flow_id = st.next_flow_id.saturating_add(flow_span);
                             start_cfg = Some((
-                                Some((start_flow_id, host_nodes)),
+                                Some((start_flow_id, host_nodes, algo)),
                                 entry.hosts,
                                 entry.comm_bytes,
                                 Some(comm_id.clone()),
                                 Some(entry.op),
+                                entry.is_async,
+                                entry.comm_stream,
                             ));
                         }
                     }
                 }
 
-                if let Some((start_cfg, hosts, bytes, comm_id, op)) = start_cfg {
-                    let done_state = Arc::clone(&state);
-                    let done_hosts = hosts.clone();
-                    let done_cb: ring::RingAllreduceDoneCallback = Box::new(move |now, sim| {
-                        for hid in &done_hosts {
-                            sim.schedule(
-                                now,
-                                StartRankStep {
-                                    rank_id: *hid,
-                                    state: Arc::clone(&done_state),
-                                },
-                            );
-                        }
-                    });
+                if let Some((start_cfg, hosts, bytes, comm_id, op, is_async, comm_stream)) =
+                    start_cfg
+                {
                     if bytes == 0 || hosts.len() <= 1 {
-                        done_cb(sim.now(), sim);
+                        if !is_async {
+                            let done_state = Arc::clone(&state);
+                            for hid in hosts {
+                                sim.schedule(
+                                    sim.now(),
+                                    StartRankStep {
+                                        rank_id: hid,
+                                        state: Arc::clone(&done_state),
+                                    },
+                                );
+                            }
+                        }
                         return;
                     }
-                    let (start_flow_id, host_nodes) =
+                    let (start_flow_id, host_nodes, algo) =
                         start_cfg.expect("ring allreduce config missing");
-                    let ranks = host_nodes.len();
-                    let chunk_bytes = (bytes + ranks as u64 - 1) / ranks as u64;
+                    let chunk_bytes = algo.chunk_bytes(bytes, host_nodes.len());
                     let transport: Box<dyn RingTransport> = match protocol {
                         TransportProtocol::Tcp => Box::new(TcpRingTransport { cfg: tcp_cfg }),
                         TransportProtocol::Dctcp => Box::new(DctcpRingTransport { cfg: dctcp_cfg }),
                     };
+                    let done_cb: Option<ring::RingAllreduceDoneCallback> = if is_async {
+                        let done_state = Arc::clone(&state);
+                        let done_hosts = hosts.clone();
+                        let done_comm_stream = comm_stream;
+                        Some(Box::new(move |now, sim| {
+                            let mut wake = Vec::new();
+                            {
+                                let mut st = done_state.lock().expect("rank workload state lock");
+                                for hid in &done_hosts {
+                                    let Some(rank_state) = st.ranks.get_mut(hid) else {
+                                        continue;
+                                    };
+                                    rank_state.pending_async_total =
+                                        rank_state.pending_async_total.saturating_sub(1);
+                                    let mut remove_stream = false;
+                                    if let Some(counter) =
+                                        rank_state.pending_async_by_stream.get_mut(&done_comm_stream)
+                                    {
+                                        *counter = counter.saturating_sub(1);
+                                        remove_stream = *counter == 0;
+                                    }
+                                    if remove_stream {
+                                        rank_state.pending_async_by_stream.remove(&done_comm_stream);
+                                    }
+                                    let should_wake = match rank_state.waiting_for_async {
+                                        AsyncWaitKind::None => false,
+                                        AsyncWaitKind::All => rank_state.pending_async_total == 0,
+                                        AsyncWaitKind::Stream(s) => rank_state
+                                            .pending_async_by_stream
+                                            .get(&s)
+                                            .copied()
+                                            .unwrap_or(0)
+                                            == 0,
+                                    };
+                                    if should_wake {
+                                        rank_state.waiting_for_async = AsyncWaitKind::None;
+                                        wake.push(*hid);
+                                    }
+                                }
+                            }
+                            for hid in wake {
+                                sim.schedule(
+                                    now,
+                                    StartRankStep {
+                                        rank_id: hid,
+                                        state: Arc::clone(&done_state),
+                                    },
+                                );
+                            }
+                        }))
+                    } else {
+                        let done_state = Arc::clone(&state);
+                        let done_hosts = hosts.clone();
+                        Some(Box::new(move |now, sim| {
+                            for hid in &done_hosts {
+                                sim.schedule(
+                                    now,
+                                    StartRankStep {
+                                        rank_id: *hid,
+                                        state: Arc::clone(&done_state),
+                                    },
+                                );
+                            }
+                        }))
+                    };
                     let handles = {
                         let st = state.lock().expect("rank workload state lock");
-                        Arc::clone(&st.allreduce_handles)
+                        Arc::clone(&st.collective_handles)
                     };
-                    let handle = ring::start_ring_allreduce_at(
-                        sim,
-                        RingAllreduceConfig {
-                            ranks: host_nodes.len(),
-                            hosts: host_nodes,
-                            chunk_bytes,
-                            routing,
-                            start_flow_id,
-                            transport,
-                            done_cb: Some(done_cb),
-                        },
-                        sim.now(),
-                    );
-                    let record = AllreduceRecord {
+                    let cfg = RingAllreduceConfig {
+                        ranks: host_nodes.len(),
+                        hosts: host_nodes,
+                        chunk_bytes,
+                        routing,
+                        start_flow_id,
+                        transport,
+                        done_cb,
+                    };
+                    let handle = match algo {
+                        CollectiveOp::Allreduce => {
+                            ring::start_ring_allreduce_at(sim, cfg, sim.now())
+                        }
+                        CollectiveOp::Allgather => {
+                            ring::start_ring_allgather_at(sim, cfg, sim.now())
+                        }
+                        CollectiveOp::Reducescatter => {
+                            ring::start_ring_reducescatter_at(sim, cfg, sim.now())
+                        }
+                        CollectiveOp::Alltoall => ring::start_ring_alltoall_at(sim, cfg, sim.now()),
+                    };
+                    let record = CollectiveRecord {
                         step_id: step.id,
                         label: step.label.clone(),
                         comm_id,
@@ -503,24 +764,76 @@ impl htsim_rs::sim::Event for StartRankStep {
                             receiver: None,
                             arrived: Vec::new(),
                         });
+                    if entry.comm_bytes != comm_bytes {
+                        panic!(
+                            "comm_id {:?} sendrecv comm_bytes mismatch: existing bytes={} vs new bytes={}",
+                            comm_id, entry.comm_bytes, comm_bytes
+                        );
+                    }
                     if !entry.arrived.contains(&rank_id) {
                         entry.arrived.push(rank_id);
                     }
+                    if entry.arrived.len() > 2 {
+                        panic!(
+                            "comm_id {:?} sendrecv has >2 participants: {:?}",
+                            comm_id, entry.arrived
+                        );
+                    }
                     match direction {
                         SendRecvDirection::Send => {
-                            entry.sender = Some(rank_id);
-                            if entry.receiver.is_none() {
-                                entry.receiver = peer;
+                            if let Some(sender) = entry.sender {
+                                if sender != rank_id {
+                                    panic!(
+                                        "comm_id {:?} sendrecv has multiple senders: {} vs {}",
+                                        comm_id, sender, rank_id
+                                    );
+                                }
                             }
+                            if let Some(p) = peer {
+                                if let Some(receiver) = entry.receiver {
+                                    if receiver != p {
+                                        panic!(
+                                            "comm_id {:?} sendrecv peer mismatch: receiver={} vs peer={}",
+                                            comm_id, receiver, p
+                                        );
+                                    }
+                                } else {
+                                    entry.receiver = Some(p);
+                                }
+                            }
+                            entry.sender = Some(rank_id);
                         }
                         SendRecvDirection::Recv => {
-                            entry.receiver = Some(rank_id);
-                            if entry.sender.is_none() {
-                                entry.sender = peer;
+                            if let Some(receiver) = entry.receiver {
+                                if receiver != rank_id {
+                                    panic!(
+                                        "comm_id {:?} sendrecv has multiple receivers: {} vs {}",
+                                        comm_id, receiver, rank_id
+                                    );
+                                }
                             }
+                            if let Some(p) = peer {
+                                if let Some(sender) = entry.sender {
+                                    if sender != p {
+                                        panic!(
+                                            "comm_id {:?} sendrecv peer mismatch: sender={} vs peer={}",
+                                            comm_id, sender, p
+                                        );
+                                    }
+                                } else {
+                                    entry.sender = Some(p);
+                                }
+                            }
+                            entry.receiver = Some(rank_id);
                         }
                     }
-                    if let (Some(sender), Some(receiver)) = (entry.sender, entry.receiver) {
+                    let ready = entry.sender.is_some()
+                        && entry.receiver.is_some()
+                        && (entry.arrived.len() == 2 || entry.sender == entry.receiver);
+                    if ready {
+                        let (Some(sender), Some(receiver)) = (entry.sender, entry.receiver) else {
+                            unreachable!("ready implies sender/receiver are set");
+                        };
                         let entry = st
                             .pending_sendrecv
                             .remove(&comm_id)
@@ -851,7 +1164,7 @@ fn main() {
     let mut gpu_map = HashMap::new();
     let mut next_rank_id = 0usize;
 
-    let allreduce_handles = Arc::new(Mutex::new(Vec::new()));
+    let collective_handles = Arc::new(Mutex::new(Vec::new()));
 
     for (tenant_idx, (path, w)) in workloads.iter().enumerate() {
         let old_rank_ids = w.ranks.iter().map(|r| r.id).collect::<Vec<_>>();
@@ -935,7 +1248,16 @@ fn main() {
                 .get(&rank.id)
                 .unwrap_or_else(|| panic!("tenant {} missing rank id {}", tenant_idx, rank.id));
             let steps = remap_rank_steps(tenant_idx, &rank.steps, &id_map, &tenant_hosts_new);
-            ranks.insert(new_rank_id, RankState { steps, idx: 0 });
+            ranks.insert(
+                new_rank_id,
+                RankState {
+                    steps,
+                    idx: 0,
+                    pending_async_total: 0,
+                    pending_async_by_stream: HashMap::new(),
+                    waiting_for_async: AsyncWaitKind::None,
+                },
+            );
         }
 
         next_dc_start = (next_dc_start + 1) % dc_count;
@@ -953,7 +1275,7 @@ fn main() {
         dctcp_cfg: DctcpConfig::default(),
         pending_collectives: HashMap::new(),
         pending_sendrecv: HashMap::new(),
-        allreduce_handles: Arc::clone(&allreduce_handles),
+        collective_handles: Arc::clone(&collective_handles),
     }));
 
     for rank_id in hosts_all {
@@ -972,8 +1294,34 @@ fn main() {
         sim.run(&mut world);
     }
 
+    if args.until_ms.is_none() {
+        let st = state.lock().expect("rank workload state lock");
+        if !st.pending_collectives.is_empty() {
+            let keys = st.pending_collectives.keys().cloned().collect::<Vec<_>>();
+            panic!("unresolved collectives at end of sim: {keys:?}");
+        }
+        if !st.pending_sendrecv.is_empty() {
+            let keys = st.pending_sendrecv.keys().cloned().collect::<Vec<_>>();
+            panic!("unresolved sendrecv at end of sim: {keys:?}");
+        }
+        let pending_async = st
+            .ranks
+            .iter()
+            .filter_map(|(rid, rs)| {
+                if rs.pending_async_total > 0 {
+                    Some((*rid, rs.pending_async_total))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !pending_async.is_empty() {
+            panic!("unresolved async collectives at end of sim: {pending_async:?}");
+        }
+    }
+
     if args.fct_stats {
-        if let Ok(list) = allreduce_handles.lock() {
+        if let Ok(list) = collective_handles.lock() {
             for record in list.iter() {
                 let stats = record.handle.stats();
                 let start = stats.start_at.unwrap_or(SimTime::ZERO);
@@ -987,7 +1335,7 @@ fn main() {
                 let p99_ms = p99_ns as f64 / 1_000_000.0;
                 let max_flow_ms = max_flow_ns as f64 / 1_000_000.0;
                 println!(
-                    "allreduce_fct step_id={:?} label={:?} comm_id={:?} op={:?} hosts={} comm_bytes={} makespan_ms={:.6} p99_flow_fct_ms={:.6} max_flow_fct_ms={:.6} flows={}",
+                    "collective_fct step_id={:?} label={:?} comm_id={:?} op={:?} hosts={} comm_bytes={} makespan_ms={:.6} p99_flow_fct_ms={:.6} max_flow_fct_ms={:.6} flows={}",
                     record.step_id,
                     record.label,
                     record.comm_id,
@@ -1009,5 +1357,116 @@ fn main() {
             fs::write(&path, json).expect("write viz json");
             eprintln!("wrote viz events to {}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step_sendrecv(peer: usize, direction: SendRecvDirection) -> RankStepSpec {
+        RankStepSpec {
+            id: None,
+            label: Some("s".to_string()),
+            kind: Some(RankStepKind::Sendrecv),
+            op: None,
+            compute_ms: None,
+            comm_bytes: Some(123),
+            comm_id: Some("comm".to_string()),
+            comm_stream: None,
+            hosts: None,
+            peer: Some(peer),
+            direction: Some(direction),
+        }
+    }
+
+    fn step_collective_without_hosts(op: &str) -> RankStepSpec {
+        RankStepSpec {
+            id: None,
+            label: Some("c".to_string()),
+            kind: Some(RankStepKind::Collective),
+            op: Some(op.to_string()),
+            compute_ms: None,
+            comm_bytes: Some(456),
+            comm_id: Some("cid".to_string()),
+            comm_stream: None,
+            hosts: None,
+            peer: None,
+            direction: None,
+        }
+    }
+
+    #[test]
+    fn remap_rank_steps_maps_peer_hosts_and_prefixes_ids() {
+        let steps = vec![
+            step_sendrecv(1, SendRecvDirection::Send),
+            RankStepSpec {
+                id: None,
+                label: Some("h".to_string()),
+                kind: Some(RankStepKind::Collective),
+                op: Some("allreduce".to_string()),
+                compute_ms: None,
+                comm_bytes: Some(10),
+                comm_id: Some("x".to_string()),
+                comm_stream: None,
+                hosts: Some(vec![0, 1]),
+                peer: None,
+                direction: None,
+            },
+            step_collective_without_hosts("allgather"),
+        ];
+
+        let mut id_map = HashMap::new();
+        id_map.insert(0, 10);
+        id_map.insert(1, 11);
+        let default_hosts = vec![10, 11];
+
+        let out = remap_rank_steps(2, &steps, &id_map, &default_hosts);
+        assert_eq!(out.len(), 3);
+
+        // sendrecv peer mapping + prefixing
+        assert_eq!(out[0].peer, Some(11));
+        assert_eq!(out[0].comm_id.as_deref(), Some("t2:comm"));
+        assert_eq!(out[0].label.as_deref(), Some("t2:s"));
+
+        // collective explicit hosts are remapped
+        assert_eq!(out[1].hosts.as_ref().unwrap(), &vec![10, 11]);
+        assert_eq!(out[1].comm_id.as_deref(), Some("t2:x"));
+        assert_eq!(out[1].label.as_deref(), Some("t2:h"));
+
+        // collective without hosts gets default hosts
+        assert_eq!(out[2].hosts.as_ref().unwrap(), &default_hosts);
+        assert_eq!(out[2].comm_id.as_deref(), Some("t2:cid"));
+        assert_eq!(out[2].label.as_deref(), Some("t2:c"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn remap_rank_steps_panics_on_unknown_peer() {
+        let steps = vec![step_sendrecv(9, SendRecvDirection::Recv)];
+        let id_map = HashMap::new();
+        let default_hosts = vec![];
+        let _ = remap_rank_steps(0, &steps, &id_map, &default_hosts);
+    }
+
+    #[test]
+    #[should_panic]
+    fn remap_rank_steps_panics_on_unknown_host_in_hosts_list() {
+        let steps = vec![RankStepSpec {
+            id: None,
+            label: None,
+            kind: Some(RankStepKind::Collective),
+            op: Some("allreduce".to_string()),
+            compute_ms: None,
+            comm_bytes: Some(10),
+            comm_id: Some("x".to_string()),
+            comm_stream: None,
+            hosts: Some(vec![123]),
+            peer: None,
+            direction: None,
+        }];
+        let id_map = HashMap::new();
+        let default_hosts = vec![];
+        let _ = remap_rank_steps(1, &steps, &id_map, &default_hosts);
     }
 }

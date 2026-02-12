@@ -100,6 +100,12 @@ pub struct TcpConn {
     inflight: BTreeMap<u64, SentSeg>, // seq -> segment
     recover: u64,
     in_fast_recovery: bool,
+    /// Upper bound of seq range that should be treated as retransmissions after an RTO.
+    ///
+    /// When an RTO triggers we restart sending from `last_acked` but keep track of the
+    /// previous `next_seq` as a "high watermark": any segment with `seq < watermark`
+    /// was sent before and should be marked as a retransmission in viz logs.
+    rto_retrans_end: Option<u64>,
 
     // receiver
     rcv_nxt: u64,
@@ -162,6 +168,7 @@ impl TcpConn {
             inflight: BTreeMap::new(),
             recover: 0,
             in_fast_recovery: false,
+            rto_retrans_end: None,
             rcv_nxt: 0,
             out_of_order: BTreeMap::new(),
             sender_state,
@@ -215,6 +222,7 @@ impl TcpConn {
             inflight: BTreeMap::new(),
             recover: 0,
             in_fast_recovery: false,
+            rto_retrans_end: None,
             rcv_nxt: 0,
             out_of_order: BTreeMap::new(),
             sender_state,
@@ -453,14 +461,17 @@ impl TcpStack {
             pkt.size_bytes = conn.cfg.mss; // 包大小按 mss 计（简化）
             pkt.transport = Transport::Tcp(TcpSegment::Data { seq, len });
 
-            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len, false);
+            let retrans = conn
+                .rto_retrans_end
+                .is_some_and(|watermark| seq < watermark);
+            net.viz_tcp_send_data(sim.now().0, conn.id, seq, len, retrans);
 
             conn.inflight.insert(
                 seq,
                 SentSeg {
                     len,
                     sent_at: sim.now(),
-                    retransmitted: false,
+                    retransmitted: retrans,
                 },
             );
 
@@ -887,6 +898,8 @@ impl Event for TcpRto {
 
             // RTO typically indicates severe loss; restarting from the last ACKed byte
             // avoids "one-segment-per-RTO" tail loss recovery.
+            let watermark = conn.next_seq;
+            conn.rto_retrans_end = Some(watermark);
             conn.next_seq = conn.last_acked;
             conn.inflight.clear();
             let id = conn.id;
